@@ -32,6 +32,7 @@ import {
   makeAgentStateDirectory,
 } from './layout.ts';
 import { applyPerAgentWorkspaces } from './workspaces.ts';
+import { applyStratusSoul } from './stratus-soul.ts';
 import {
   MEMORY_FILENAME,
   stratusHomePath,
@@ -591,6 +592,30 @@ const TASK_NOTES_EXPIRY_NOTICE: StateMigration = {
   },
 };
 
+/**
+ * The agent that answered runs with no soul used to live in code, with the
+ * id `stratus`. This build has no such agent, so a home that used it gets
+ * it as a soul file, and its default when it had none (see
+ * `applyStratusSoul`). A home that never used it gets nothing.
+ *
+ * Runs only once the per-agent moves (0003, 0004) have, for the reason
+ * 0006 gives: before them the agent's sessions and memories may still be in
+ * the shared files this does not read, and it would judge the home unused.
+ * No backup and no schema bump: it adds a soul and, at most, one key to the
+ * config, and an older build serves the same agent from the same state
+ * (the config's default soul may take the id there).
+ */
+const STRATUS_SOUL_MIGRATION: StateMigration = {
+  id: '0007-stratus-agent-soul',
+  description: 'write the stratus agent, which lived in code, as a soul on a home that used it',
+  needsBackup: false,
+  requiresExclusive: async (env) => {
+    const applied = (await readStateStamp(env)).applied;
+    return !applied.includes(PER_AGENT_LAYOUT_MIGRATION.id) || !applied.includes(PER_AGENT_WORKSPACES_MIGRATION.id);
+  },
+  apply: applyStratusSoul,
+};
+
 export const STATE_MIGRATIONS: readonly StateMigration[] = [
   OWNER_ONLY_STATE_FILES_MIGRATION,
   PROVENANCE_LABELS_MIGRATION,
@@ -598,6 +623,7 @@ export const STATE_MIGRATIONS: readonly StateMigration[] = [
   PER_AGENT_WORKSPACES_MIGRATION,
   SAFE_TOOLS_DEFAULT_MIGRATION,
   TASK_NOTES_EXPIRY_NOTICE,
+  STRATUS_SOUL_MIGRATION,
 ];
 
 const unversionedStamp = (): StateStamp => ({ schemaVersion: 0, applied: [] });

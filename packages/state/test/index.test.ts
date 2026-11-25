@@ -1106,19 +1106,18 @@ test('two ids that differ only by Unicode normalization are one directory too', 
   assert.match(failure.message, /b-second\.md/);
 });
 
-test('a soul claiming the built-in id in another case is ignored, not served', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-case-'));
+test('a soul declaring the id stratus is on the roster like any other', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-stratus-'));
   const dir = agentsDirPath({ homeDir: home });
   await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, 'impostor.md'), '---\nname: Impostor\nid: Stratus\n---\n\nYou are not Stratus.\n');
+  await writeFile(path.join(dir, 'stratus.md'), '---\nname: Stratus\nid: stratus\n---\n\nYou are Stratus.\n');
 
   const warnings: string[] = [];
   const roster = await loadRosterSouls({ homeDir: home }, (message) => warnings.push(message));
 
-  // `agents/Stratus/` is the built-in agent's own state directory wherever
-  // case folds, so this is the reserved id, spelled differently.
-  assert.deepEqual(roster, []);
-  assert.match(warnings.join(' '), /reserved/);
+  // No agent lives in code any more, so no id is held back for one.
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id), ['stratus']);
+  assert.deepEqual(warnings, []);
 });
 
 test('an unreadable soul still degrades to a warning, unlike a duplicate', async () => {
@@ -1140,24 +1139,18 @@ test('an unreadable soul still degrades to a warning, unlike a duplicate', async
   assert.ok(warnings.some((line) => line.includes('Invalid agent id')), JSON.stringify(warnings));
 });
 
-test('two souls claiming the reserved id are skipped, not treated as a collision', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-'));
+test('two souls claiming stratus collide like any other pair', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-stratus-pair-'));
   const dir = agentsDirPath({ homeDir: home });
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(dir, 'a.md'), '---\nname: One\nid: stratus\n---\n\nYou are one.\n');
-  await writeFile(path.join(dir, 'b.md'), '---\nname: Two\nid: stratus\n---\n\nYou are two.\n');
-  await writeFile(path.join(dir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(dir, 'b.md'), '---\nname: Two\nid: Stratus\n---\n\nYou are two.\n');
 
-  // Neither was going to get the id — it is reserved — so their agreeing
-  // on it is not an ambiguity worth refusing over. Left after the
-  // collision check, a repository could take a daemon down just by
-  // shipping two souls named `stratus`, turning a guard against hijacking
-  // the built-in into a way to deny service.
-  const warnings: string[] = [];
-  const entries = await loadRosterSouls({ homeDir: home }, (line) => warnings.push(line));
-
-  assert.deepEqual(entries.map((entry) => entry.soul.agent.id), ['ava']);
-  assert.equal(warnings.filter((line) => line.includes('reserved')).length, 2);
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
 });
 
 test('an injected query transport reaches a subscription fallback behind any primary', async () => {
@@ -2078,12 +2071,16 @@ test('a config that is simply not there leaves the id check with nothing to repo
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-declared-'));
   const configPath = path.join(home, '.stratus', 'config.json');
 
+  await mkdir(agentsDirPath({ homeDir: home }), { recursive: true });
+  await writeFile(path.join(agentsDirPath({ homeDir: home }), 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
   const absent = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
   assert.deepEqual(absent.unread, []);
-  assert.ok(absent.holds('stratus'));
+  assert.ok(absent.holds('ava'));
   // And by the rule the filesystem uses, not by the exact string: an id
   // is claimed against what would name the same directory.
-  assert.ok(absent.holds('Stratus'));
+  assert.ok(absent.holds('Ava'));
+  // No id is held back for an agent that lives in code: none does.
+  assert.equal(absent.holds('stratus'), false);
 
   // A config that exists and will not parse is the other case, and stays
   // reported: there the ids really are unchecked.

@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import { MEMORY_READ_MAX_BYTES, memoryValidityAt, type MemoryEntry } from '@stratusagent/core';
 
-import { createFileMemoryStore, DEFAULT_STRATUS_AGENT, withLegacyDefaultMemories } from '../src/index.ts';
+import { createFileMemoryStore, LEGACY_DEFAULT_AGENT_ID, withLegacyDefaultMemories } from '../src/index.ts';
 
 const AT = new Date('2026-06-01T00:00:00.000Z');
 const frozen = { now: () => AT };
@@ -232,27 +232,27 @@ test('a fact with an unreadable date ranks as the oldest, not the newest', async
 
 test('the legacy alias wrapper keeps a ranked order instead of re-sorting it by date', async () => {
   const store = withLegacyDefaultMemories(createFileMemoryStore(await seed([
-    ...FILLER.map((line) => ({ ...line, agentId: DEFAULT_STRATUS_AGENT.id })),
-    { id: 'stratus:memory:old-exact', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the deploy pipeline runs on Fridays', createdAt: '2026-02-01T00:00:00.000Z' },
-    { id: 'stratus:memory:new-partial', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the refunds pipeline is manual', createdAt: '2026-05-31T00:00:00.000Z' },
+    ...FILLER.map((line) => ({ ...line, agentId: LEGACY_DEFAULT_AGENT_ID })),
+    { id: 'stratus:memory:old-exact', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the deploy pipeline runs on Fridays', createdAt: '2026-02-01T00:00:00.000Z' },
+    { id: 'stratus:memory:new-partial', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the refunds pipeline is manual', createdAt: '2026-05-31T00:00:00.000Z' },
     { id: 'demo-agent:memory:legacy', agentId: 'demo-agent', content: 'the deploy pipeline needs a token', createdAt: '2025-12-01T00:00:00.000Z' },
   ]), frozen));
 
-  const found = await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy pipeline', { strategy: 'hybrid' });
+  const found = await store.search(LEGACY_DEFAULT_AGENT_ID, 'deploy pipeline', { strategy: 'hybrid' });
   assert.equal(found.strategy, 'hybrid');
   // Each alias's best match ahead of either alias's weaker ones.
   assert.deepEqual(ids(found.entries), ['stratus:memory:old-exact', 'demo-agent:memory:legacy', 'stratus:memory:new-partial']);
 
   // And the recency read across aliases is what it always was.
-  const recency = await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy pipeline');
+  const recency = await store.search(LEGACY_DEFAULT_AGENT_ID, 'deploy pipeline');
   assert.equal(recency.strategy, 'recency');
   assert.deepEqual(ids(recency.entries), ['stratus:memory:old-exact', 'demo-agent:memory:legacy']);
 });
 
 test('across aliases, a fact holding every word comes ahead of another alias\'s partial match', async () => {
   const store = withLegacyDefaultMemories(createFileMemoryStore(await seed([
-    ...FILLER.map((line) => ({ ...line, agentId: DEFAULT_STRATUS_AGENT.id })),
-    { id: 'stratus:memory:new-partial', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the refunds pipeline is manual', createdAt: '2026-05-31T00:00:00.000Z' },
+    ...FILLER.map((line) => ({ ...line, agentId: LEGACY_DEFAULT_AGENT_ID })),
+    { id: 'stratus:memory:new-partial', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the refunds pipeline is manual', createdAt: '2026-05-31T00:00:00.000Z' },
     { id: 'demo-agent:memory:exact', agentId: 'demo-agent', content: 'the deploy pipeline needs a token', createdAt: '2025-12-01T00:00:00.000Z' },
   ]), frozen));
 
@@ -260,10 +260,10 @@ test('across aliases, a fact holding every word comes ahead of another alias\'s 
   // holds the one fact with every word. Taking turns by rank alone would
   // put the partial first and let a limit of one drop the exact match.
   for (const strategy of ['hybrid', 'relevance'] as const) {
-    const top = await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy pipeline', { strategy, limit: 1 });
+    const top = await store.search(LEGACY_DEFAULT_AGENT_ID, 'deploy pipeline', { strategy, limit: 1 });
     assert.deepEqual(ids(top.entries), ['demo-agent:memory:exact'], strategy);
     assert.equal(top.truncated, true, strategy);
-    const all = await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy pipeline', { strategy });
+    const all = await store.search(LEGACY_DEFAULT_AGENT_ID, 'deploy pipeline', { strategy });
     assert.deepEqual(ids(all.entries), ['demo-agent:memory:exact', 'stratus:memory:new-partial'], strategy);
   }
 });

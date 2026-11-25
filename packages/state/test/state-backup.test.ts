@@ -111,7 +111,7 @@ test('a run that applies a data migration first copies the state files into a da
 
   const manifest = JSON.parse(await readFile(path.join(backup!.path, 'backup.json'), 'utf8'));
   assert.deepEqual(manifest.from, JSON.parse(stampBytes));
-  assert.deepEqual(manifest.migrations, ['0004-per-agent-workspaces', '0005-safe-tools-default', '0006-task-notes-expiry-notice']);
+  assert.deepEqual(manifest.migrations, ['0004-per-agent-workspaces', '0005-safe-tools-default', '0006-task-notes-expiry-notice', '0007-stratus-agent-soul']);
   assert.equal(manifest.createdAt, backup!.createdAt);
 
   // Owner-only: it holds every agent's conversations and memories.

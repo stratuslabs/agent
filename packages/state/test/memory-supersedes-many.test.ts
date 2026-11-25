@@ -6,7 +6,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { buildMemoryInjection, renderMemorySection } from '@stratusagent/core';
-import { createFileMemoryStore, DEFAULT_STRATUS_AGENT, withLegacyDefaultMemories } from '../src/index.ts';
+import { createFileMemoryStore, LEGACY_DEFAULT_AGENT_ID, withLegacyDefaultMemories } from '../src/index.ts';
 
 const AT = new Date('2026-06-01T00:00:00.000Z');
 
@@ -114,12 +114,12 @@ test('a merge of inherited facts is filed where they live, by the ids recall han
     { id: 'demo-agent:memory:2', agentId: 'demo-agent', content: 'deploys go to MySQL', createdAt: '2026-01-02T00:00:00.000Z' },
   ].map((line) => `${JSON.stringify(line)}\n`).join(''));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, ticking()));
-  const recalled = (await store.search(DEFAULT_STRATUS_AGENT.id, 'MySQL')).entries.map((entry) => entry.id).sort();
+  const recalled = (await store.search(LEGACY_DEFAULT_AGENT_ID, 'MySQL')).entries.map((entry) => entry.id).sort();
   assert.deepEqual(recalled, ['demo-agent:memory:1', 'demo-agent:memory:2']);
 
-  const merged = await store.append(DEFAULT_STRATUS_AGENT.id, 'the deploy runs on MySQL', { supersedes: recalled });
-  assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'MySQL')).entries.map((entry) => entry.id), [merged.id]);
-  assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.id), [merged.id]);
+  const merged = await store.append(LEGACY_DEFAULT_AGENT_ID, 'the deploy runs on MySQL', { supersedes: recalled });
+  assert.deepEqual((await store.search(LEGACY_DEFAULT_AGENT_ID, 'MySQL')).entries.map((entry) => entry.id), [merged.id]);
+  assert.deepEqual((await store.list(LEGACY_DEFAULT_AGENT_ID)).entries.map((entry) => entry.id), [merged.id]);
 });
 
 test('the upgrade to a revisions table keyed by target keeps the usage counters, which no rebuild can restore', async () => {

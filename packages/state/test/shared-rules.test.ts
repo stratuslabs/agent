@@ -49,9 +49,9 @@ test('listAgentSummaries carries the structured avatar palette, not a rendered l
   assert.equal(ava.provider, 'anthropic');
   assert.equal(ava.builtIn, false);
 
-  // The built-in is always present, and is the default while no soul is configured.
-  const builtIn = summaries.find((entry) => entry.builtIn);
-  assert.equal(builtIn?.default, true);
+  // Only souls are listed: no agent lives in code, so with no default soul
+  // configured none is the default.
+  assert.deepEqual(summaries.map((entry) => [entry.id, entry.default]), [['ava', false]]);
 });
 
 test('listAgentSummaries degrades on a soul it cannot parse instead of failing the listing', async () => {
@@ -367,6 +367,7 @@ test('servedRuntimes takes its pin context from the config the daemon was pinned
 test('a summary reports the runtime a pinned soul dispatches on, not the environment', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'bea.md', '---\nname: Bea\nid: bea\n---\n\nYou are Bea.\n');
   await saveConfigFile(globalConfigPath({ homeDir: home }), { provider: 'openai', model: 'gpt-4.1-mini' });
 
   // A daemon started with the environment naming a different provider than
@@ -384,10 +385,10 @@ test('a summary reports the runtime a pinned soul dispatches on, not the environ
   assert.equal(ava.runsOn.provider, 'anthropic', `reported ${JSON.stringify(ava.runsOn)}`);
   assert.notEqual(ava.runsOn.model, 'gpt-4o', 'the demoted default model must not ride along either');
 
-  // The built-in pins nothing, so it does follow the environment.
-  const builtIn = summaries.find((entry) => entry.builtIn);
-  assert.ok(builtIn);
-  assert.deepEqual(builtIn.runsOn, { provider: 'openai', model: 'gpt-4o' });
+  // A soul that pins nothing does follow the environment.
+  const bea = summaries.find((entry) => entry.id === 'bea');
+  assert.ok(bea);
+  assert.deepEqual(bea.runsOn, { provider: 'openai', model: 'gpt-4o' });
 });
 
 test('servedRuntimes applies the configured default soul\'s pins, wherever it lives', async () => {
@@ -446,6 +447,7 @@ test('saveConfigFile creates the directory and round-trips through loadAgentSumm
   // Trailing newline, as every config this repo writes has.
   assert.ok((await readFile(configPath, 'utf8')).endsWith('\n'));
 
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
   const summaries = await listAgentSummaries({ homeDir: home, cwd: home, processEnv: {} });
   assert.deepEqual(summaries[0]?.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
   // Nothing has remembered anything yet.
