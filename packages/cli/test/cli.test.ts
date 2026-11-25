@@ -98,7 +98,7 @@ import { SESSION_TAINTED_BY_METADATA_KEY, SESSION_TRUST_METADATA_KEY } from '@st
 import type { Session, Tool } from '@stratusagent/core';
 import { BUNDLED_PLUGIN_INDEX } from '../src/plugin-index.ts';
 import { memoryCommandWritesState } from '../src/parse.ts';
-import { agentHome, STRATUS_SOUL } from './default-agent.ts';
+import { addDefaultAgent, agentHome, STRATUS_SOUL } from './default-agent.ts';
 
 const packageDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
 // Isolated HOME so tests never read or write the real ~/.stratus.
@@ -3320,7 +3320,7 @@ test('a broken configured soul does not discard the roster\'s claims', async () 
   await loadRosterSouls({ homeDir: home });
 });
 
-test('creating an agent never claims the reserved built-in id', async () => {
+test('creating an agent named Stratus gets the id stratus, now that none is held back', async () => {
   const { loadRosterSouls } = await import('@stratusagent/state');
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
 
@@ -3338,12 +3338,9 @@ test('creating an agent never claims the reserved built-in id', async () => {
   });
 
   assert.equal(exitCode, 0);
-  // A soul claiming `stratus` is skipped at load, so writing one would
-  // create an agent that silently never appears on the roster.
-  const written = await readdir(path.join(home, '.stratus', 'agents'));
-  assert.deepEqual(written.map((file) => file.replace(/\.md$/, '')).filter((id) => id === 'stratus'), []);
   const roster = await loadRosterSouls({ homeDir: home });
-  assert.equal(roster.length, 1, `roster was ${JSON.stringify(roster.map((entry) => entry.soul.agent.id))}`);
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id), ['stratus']);
+  assert.equal(roster[0]?.soul.agent.instructions, 'Be kind and brief.');
 });
 
 test('switching provider warns when the default soul pins another provider', async () => {
@@ -4531,7 +4528,7 @@ test('serve moves a soul left in ~/.stratus/agents into the visible agents folde
   assert.equal(code, 0, output.stderr);
   assert.match(output.stdout, /agents folder: moved 1 soul\(s\) and 0 workspace\(s\) into .*Agents/);
   assert.equal(await readlink(hidden), path.join(serveHome, 'Agents', 'ava', 'soul.md'));
-  assert.match(output.stdout, /stratusd ready — 2 agent\(s\)/);
+  assert.match(output.stdout, /stratusd ready — 1 agent\(s\)/);
 });
 
 test('runCli serve starts the gateway, prints a ready line, and drains on shutdown', async () => {
@@ -4609,6 +4606,7 @@ test('serve names the agents no channel can ask for', async () => {
     path.join(serveHome, '.stratus', 'config.json'),
     JSON.stringify({ approvals: { mode: 'remote' } }),
   );
+  await addDefaultAgent(serveHome);
   const { streams, output } = createStreams();
   const controller = new AbortController();
   setTimeout(() => controller.abort(), 150);
@@ -5998,6 +5996,7 @@ const serveThenDoctor = async (apiHost: string | undefined) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-bind-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }), { mode: 0o600 });
+  await addDefaultAgent(home);
   await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }), { mode: 0o600 });
   const controller = new AbortController();
   const served = createStreams();
@@ -6051,6 +6050,7 @@ test('doctor against a real daemon: an intake warning is a problem while paused 
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   // A runnable config, so the intake warning is the only problem doctor has.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', model: 'claude-opus-5' }), { mode: 0o600 });
+  await addDefaultAgent(home);
   await writeFile(path.join(home, '.stratus', 'credentials.json'), JSON.stringify({ anthropic: { type: 'api_key', value: 'sk-ant-stored' } }), { mode: 0o600 });
   // Not a pause record: the daemon fails closed, starts paused and warns.
   await writeFile(path.join(home, '.stratus', 'intake.json'), '{"paused":', { mode: 0o600 });
@@ -6917,6 +6917,7 @@ test('doctor reports a usable fallback and the warning covers a demoted one', as
     openai: { type: 'api_key', value: 'sk-openai' },
     anthropic: { type: 'oauth_token', value: 'sk-ant-oat-x' },
   }));
+  await addDefaultAgent(home);
 
   const doctor = createStreams();
   const exitCode = await runCli({
@@ -7638,14 +7639,13 @@ test('the Channels menu connects the built-in agent on a fresh install', async (
   assert.deepEqual(credentials.channels, { slack: { stratus: { appToken: 'xapp-t', botToken: 'xoxb-t' } } });
 });
 
-test('a roster file claiming the built-in id is skipped in the Channels menu', async () => {
+test('a roster file declaring the id stratus is offered in the Channels menu like any other', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
-  // The gateway reserves "stratus" before the roster loads and skips this
-  // file with a duplicate warning, so offering "Impostor" here would name
-  // an app for an agent that never receives a message.
-  await writeFile(path.join(agentsDir, 'impostor.md'), '---\nname: Impostor\nid: stratus\n---\n\nYou are not Stratus.\n');
+  // No id is held back for an agent in code: a soul declaring `stratus` is
+  // that agent, and the one Slack would reach.
+  await writeFile(path.join(agentsDir, 'friend.md'), '---\nname: Old Friend\nid: stratus\n---\n\nYou are an old friend.\n');
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
@@ -7661,13 +7661,11 @@ test('a roster file claiming the built-in id is skipped in the Channels menu', a
   });
 
   assert.equal(exitCode, 0);
-  assert.match(output.stdout, /Stratus \(stratus\)/);
-  assert.doesNotMatch(output.stdout, /Impostor \(stratus\)/);
-  // Reserved, not duplicated: a soul may not take over the documented
-  // fallback, and that is a skip rather than the collision between two
-  // soul files that refuses the whole roster.
-  assert.match(output.stderr, /agent id stratus is reserved for the built-in agent/);
-  assert.match(output.stderr, /impostor\.md/);
+  assert.match(output.stdout, /Old Friend \(stratus\)/);
+  assert.doesNotMatch(output.stderr, /reserved/);
+  // An agent already exists, so setup made no first agent of its own.
+  assert.doesNotMatch(output.stdout, /your first agent/);
+  assert.deepEqual(await readdir(agentsDir), ['friend.md']);
 });
 
 test('the Channels menu can clear orphaned tokens with no soul files present', async () => {
@@ -17637,7 +17635,7 @@ test('an agent created after the review is not overwritten without --force', asy
   assert.equal(await readFile(path.join(home, '.stratus', 'agents', 'scribe.md'), 'utf8'), 'somebody else\n');
 });
 
-test('an id the configured default soul holds is refused, and so is the built-in one', async () => {
+test('an id the configured default soul holds is refused, and stratus is not held back', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   // Outside `agents/`, so a roster read does not see it — but the daemon
@@ -17648,7 +17646,6 @@ test('an id the configured default soul holds is refused, and so is the built-in
   const source = await writeTemplateDir({
     'template.json': EXAMPLE_MANIFEST,
     'agents/ava.md': '---\nname: Ava\n---\n\nthe template one\n',
-    'agents/stratus.md': '---\nname: Stratus\n---\n\nthe reserved id\n',
   });
 
   const { streams, output } = createStreams();
@@ -17660,8 +17657,21 @@ test('an id the configured default soul holds is refused, and so is the built-in
 
   assert.equal(code, 1);
   assert.match(output.stdout, /cannot install ava\.md: something already claims the id ava/);
-  assert.match(output.stdout, /cannot install stratus\.md: something already claims the id stratus/);
-  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), [], 'neither was written');
+  assert.deepEqual(await readdir(path.join(home, '.stratus', 'agents')), [], 'nothing was written');
+
+  // No agent lives in code, so a template's stratus is an ordinary new agent.
+  const second = await writeTemplateDir({
+    'template.json': EXAMPLE_MANIFEST,
+    'agents/stratus.md': '---\nname: Stratus\n---\n\nnot reserved any more\n',
+  });
+  const added = createStreams();
+  const addedCode = await runCli({
+    argv: ['template', 'add', second, '--yes'],
+    streams: added.streams,
+    env: { homeDir: home, cwd: home, processEnv: {} },
+  });
+  assert.equal(addedCode, 0, added.output.stdout + added.output.stderr);
+  assert.doesNotMatch(added.output.stdout, /cannot install stratus\.md/);
 });
 
 test('the review lists skills in every layout the installer accepts', async () => {
@@ -18230,7 +18240,7 @@ test('stratus health reports a serving daemon in one line, or as JSON', async ()
     const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     assert.match(
       text.output.stdout,
-      new RegExp(`^stratusd ok at ${escaped} — version \\S+, up \\d+s, 2 agents, 0 sessions, 0 approvals pending\\n$`),
+      new RegExp(`^stratusd ok at ${escaped} — version \\S+, up \\d+s, 1 agent, 0 sessions, 0 approvals pending\\n$`),
     );
 
     const json = createStreams();

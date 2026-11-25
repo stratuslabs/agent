@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -21,3 +21,18 @@ export const withDefaultAgent = async (home: string): Promise<string> => {
 /** A temporary home under `prefix` with the default `stratus` agent in it. */
 export const agentHome = async (prefix: string): Promise<string> =>
   withDefaultAgent(await mkdtemp(path.join(os.tmpdir(), prefix)));
+
+/**
+ * Adds the default `stratus` agent to a home whose config a test already
+ * wrote, keeping every key it set.
+ */
+export const addDefaultAgent = async (home: string): Promise<string> => {
+  const dir = path.join(home, '.stratus', 'agents');
+  await mkdir(dir, { recursive: true });
+  const soul = path.join(dir, 'stratus.md');
+  await writeFile(soul, STRATUS_SOUL);
+  const configPath = path.join(home, '.stratus', 'config.json');
+  const existing = await readFile(configPath, 'utf8').then((raw) => JSON.parse(raw) as Record<string, unknown>, () => ({}));
+  await writeFile(configPath, `${JSON.stringify({ ...existing, soul })}\n`, { mode: 0o600 });
+  return soul;
+};
