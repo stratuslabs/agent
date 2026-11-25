@@ -10,6 +10,12 @@ import { conversationDrawer, topBar } from './agent-panels.js';
 import { createSettingsTab } from './agent-settings.js';
 import { paintTranscript as paintItems } from './agent-transcript.js';
 
+/**
+ * What a turn this page stopped fails with: the control API's reason for a
+ * stop from a browser session (`POST /sessions/:id/stop`).
+ */
+const STOPPED_HERE = 'Stopped from the dashboard.';
+
 /** A conversation started from this page, distinguishable from a Slack thread. */
 const newSessionId = (agentId) => `web:${agentId}:${crypto.randomUUID()}`;
 
@@ -19,12 +25,17 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     /** Whether the conversation drawer is showing. */
     drawerOpen: true,
     /**
-     * Real titles, by session id, for conversations this page has read:
-     * the first thing said in them. The session list carries no title, so
-     * the drawer names the rest by where they came from.
+     * Titles of conversations this page has read, by session id: the first
+     * thing said in them, ahead of the listing's own until it re-reads.
      */
     titles: new Map(),
     sessions: [],
+    /**
+     * What the daemon found for the search box (`GET /sessions?q=`), across
+     * every conversation, not just the ones listed; undefined while the box
+     * is empty.
+     */
+    found: undefined,
     sessionId: initialSessionId,
     /**
      * True while this conversation exists only in the page.
@@ -121,7 +132,15 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
      * ends, or until the store says it already has.
      */
     turns: new Map(),
+    /**
+     * The conversation whose turn this page asked to stop, from the click
+     * until that turn ends. Its failure is then the stop working, so it
+     * reads as a note rather than an error.
+     */
+    stopping: undefined,
     error: undefined,
+    /** A line that isn't an error, at the end of the thread: "Stopped." */
+    note: undefined,
   };
 
   const node = el('div', { class: 'chat-layout' });
@@ -147,14 +166,43 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     },
   });
   const sendButton = el('button', { class: 'send-btn', 'aria-label': 'Send', onClick: () => void send() }, icon('arrow-up', 16));
+  // In the send button's place while the agent works on this page's turn.
+  const stopButton = el('button', { class: 'send-btn', 'aria-label': 'Stop', title: 'Stop', hidden: true, onClick: () => void stop() }, icon('square', 12));
   const composerHint = el('span', { class: 'hint' });
   const composerBox = el('div', { class: 'composer-wrap' },
-    el('div', { class: 'composer' }, composer, el('div', { class: 'bar' }, composerHint, sendButton)));
+    el('div', { class: 'composer' }, composer, el('div', { class: 'bar' }, composerHint, sendButton, stopButton)));
+  /**
+   * Searches every conversation, not just the 50 listed, a moment after
+   * typing stops. The list filters what it has at once meanwhile; the
+   * daemon's answer replaces it for the query it answered, latest only.
+   */
+  let searches = 0;
+  let searchTimer;
+  const runSearch = async () => {
+    const ticket = ++searches;
+    const query = search.value.trim();
+    if (!query) {
+      state.found = undefined;
+      update();
+      return;
+    }
+    const listed = await api.sessions(agentId, 50, query).catch(() => undefined);
+    if (ticket !== searches || listed === undefined) {
+      return;
+    }
+    // Tagged with its query: once the box says something else, it no longer applies.
+    state.found = { query, sessions: listed.sessions ?? [] };
+    update();
+  };
   const search = el('input', {
     type: 'search',
     placeholder: 'Search by title',
     'aria-label': 'Search conversations by title',
-    onInput: () => update(),
+    onInput: () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => void runSearch(), 200);
+      update();
+    },
   });
 
   const agent = () => store.agents.find((candidate) => candidate.id === agentId);
@@ -163,7 +211,11 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
 
   /** The open conversation's title: its first message, once there is one. */
   const titleOfOpen = () => {
-    const first = state.messages.find((message) => message.role === 'user' && message.content);
+    // The daemon's rule (`sessionTitle`): what was said to the agent comes
+    // before what it only overheard.
+    const said = (message) => message.role === 'user' && typeof message.content === 'string' && message.content.trim();
+    const first = state.messages.find((message) => said(message) && !message.overheard && !message.observed)
+      ?? state.messages.find(said);
     if (first) {
       return firstLine(first.content, 120);
     }
@@ -206,6 +258,8 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     }
     if (state.error) {
       items.push({ kind: 'approval', node: el('div', { class: 'msg-error', role: 'alert' }, state.error) });
+    } else if (state.note) {
+      items.push({ kind: 'approval', node: el('div', { class: 'msg-note', role: 'status' }, state.note) });
     }
     if (state.messages.length > 0 && state.sessionId && !state.unsent) {
       state.titles.set(state.sessionId, titleOfOpen());
@@ -218,6 +272,10 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
   const loadSessions = async () => {
     const listed = await api.sessions(agentId, 50).catch(() => ({ sessions: [] }));
     state.sessions = listed.sessions ?? [];
+    if (search.value.trim()) {
+      // A conversation that started or changed may match now.
+      void runSearch();
+    }
     if (!state.sessionId) {
       const newest = state.sessions[0]?.id;
       state.sessionId = newest ?? newSessionId(agentId);
@@ -275,6 +333,7 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     state.turnId = state.turns.get(sessionId);
     state.settled = undefined;
     state.sending = state.turnId !== undefined || state.awaitingSend.has(sessionId);
+    state.note = undefined;
     state.tab = 'chat';
     void loadTranscript();
     if (state.sending) {
@@ -292,6 +351,7 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     state.pending = [];
     state.turnId = undefined;
     state.sending = false;
+    state.note = undefined;
     state.messages = [];
     state.streaming = '';
     state.toolLines = [];
@@ -315,6 +375,11 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     }
     state.sending = true;
     state.error = undefined;
+    state.note = undefined;
+    if (state.stopping === state.sessionId) {
+      // A stop for a turn that ended while nobody was looking at it.
+      state.stopping = undefined;
+    }
     composer.value = '';
     // Which conversation this message is for. Opening or starting another one
     // while the POST is in flight would otherwise stamp this turn's id onto
@@ -359,6 +424,9 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
       for (const envelope of queued) {
         applyEnvelope(envelope);
       }
+      // Stop waits for this answer (see `update`), and nothing else may
+      // repaint the composer before the turn's first event arrives.
+      update();
       if (state.reconcileAfterSend.delete(sentTo)) {
         // The stream came back while this POST was in flight. Now there is a
         // turn id and a stored session, so the store can finally say whether
@@ -384,6 +452,39 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
       state.sending = false;
       paintTranscript();
       update();
+    }
+  };
+
+  /**
+   * Stops this page's turn. The turn ends the way any failed turn does,
+   * with `session.failed` carrying the stop's reason, which is what clears
+   * the composer; nothing here assumes the stop worked.
+   */
+  const stop = async () => {
+    const sessionId = state.sessionId;
+    if (!sessionId || !state.sending || state.stopping === sessionId) {
+      return;
+    }
+    state.stopping = sessionId;
+    update();
+    try {
+      const result = await api.stopSession(sessionId);
+      if (result.stopped === 0 && state.sessionId === sessionId) {
+        // No turn was running: it ended while the click was on its way, and
+        // its end may have been missed. The store says how it went. Tasks
+        // the stop reached don't change that; their stops end no turn here.
+        state.stopping = undefined;
+        await reconcile();
+      }
+    } catch (error) {
+      if (state.stopping === sessionId) {
+        state.stopping = undefined;
+      }
+      if (state.sessionId === sessionId) {
+        state.error = `Couldn't stop it: ${error.message}`;
+        paintTranscript();
+        update();
+      }
     }
   };
 
@@ -531,14 +632,29 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
         break;
       case 'session.failed':
         settleTurn(envelope);
-        state.error = event.error;
+        // "Stopped." only when the stop is what ended it: a turn that failed
+        // on its own just before the stop reached it still says why.
+        if (state.stopping === envelope.sessionId && String(event.error ?? '').includes(STOPPED_HERE)) {
+          state.note = 'Stopped.';
+        } else {
+          state.error = event.error;
+        }
+        if (state.stopping === envelope.sessionId) {
+          state.stopping = undefined;
+        }
         state.sending = false;
         state.turnId = undefined;
         state.turns.delete(envelope.sessionId);
         void loadTranscript();
+        // A first turn that failed or was stopped still made a conversation.
+        void loadSessions();
         break;
       case 'session.completed':
         settleTurn(envelope);
+        if (state.stopping === envelope.sessionId) {
+          // It finished before the stop reached it.
+          state.stopping = undefined;
+        }
         state.sending = false;
         state.turnId = undefined;
         state.turns.delete(envelope.sessionId);
@@ -590,7 +706,13 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     const current = agent();
     composer.placeholder = `Message ${current?.name ?? 'this agent'}…`;
     sendButton.disabled = state.sending || !state.sessionId;
-    composerHint.textContent = state.sending ? 'Working…' : '';
+    sendButton.hidden = state.sending;
+    stopButton.hidden = !state.sending;
+    // Not until the POST has answered: before then there may be no turn to
+    // stop yet, and nothing would say so.
+    const stoppingHere = state.stopping !== undefined && state.stopping === state.sessionId;
+    stopButton.disabled = stoppingHere || (state.sessionId !== undefined && state.awaitingSend.has(state.sessionId));
+    composerHint.textContent = stoppingHere ? 'Stopping…' : state.sending ? 'Working…' : '';
     const drawerScroll = node.querySelector('.drawer .list-scroll')?.scrollTop ?? 0;
 
     const pane = el('div', { class: 'chat-pane' },
@@ -611,6 +733,7 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
       ? conversationDrawer({
           current,
           sessions: state.sessions,
+          found: state.found,
           sessionId: state.sessionId,
           unsent: state.unsent,
           titles: state.titles,
@@ -672,6 +795,11 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     if (state.sessionId) {
       state.turns.delete(state.sessionId);
     }
+    // The turn a stop was for has ended, however it ended; its marker would
+    // otherwise disable Stop on every later turn here.
+    if (state.stopping === state.sessionId) {
+      state.stopping = undefined;
+    }
     state.pending = [];
     state.streaming = '';
     state.toolLines = [];
@@ -692,5 +820,16 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
   }
   void loadSessions();
 
-  return { node, update, openSession, startSession, showTab, reconcile, destroy: detach };
+  return {
+    node,
+    update,
+    openSession,
+    startSession,
+    showTab,
+    reconcile,
+    destroy: () => {
+      clearTimeout(searchTimer);
+      detach();
+    },
+  };
 };

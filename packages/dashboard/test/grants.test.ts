@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { alwaysOffer } from '../ui/lib/grants.js';
+import { alwaysOffer, ownersUnknown } from '../ui/lib/grants.js';
 
 test('the approval card says what Always allow would grant, so no two lifetimes share one button', () => {
   // The defect standing grants exist to close: the same button meant "this session"
@@ -26,4 +26,16 @@ test('the approval card says what Always allow would grant, so no two lifetimes 
   // A request carrying no label — an older daemon across an upgrade — says
   // nothing rather than guessing at a lifetime it cannot know.
   assert.equal(alwaysOffer(undefined, 'Ava'), undefined);
+});
+
+test('a daemon that cannot list grant owners leaves the roster as the list, instead of an error', () => {
+  // A daemon whose grant store can't enumerate owners says so with 501.
+  assert.equal(ownersUnknown({ status: 501, code: 'grant_owners_unavailable' }), true);
+  // An older daemon has no /grants route at all: the router's own 404.
+  assert.equal(ownersUnknown({ status: 404, code: 'not_found' }), true);
+  // Anything else is a real failure the page must show.
+  assert.equal(ownersUnknown({ status: 404, code: 'agent_not_found' }), false);
+  assert.equal(ownersUnknown({ status: 500, code: 'internal' }), false);
+  assert.equal(ownersUnknown({ status: 0, code: 'network' }), false);
+  assert.equal(ownersUnknown(new TypeError('Failed to fetch')), false);
 });

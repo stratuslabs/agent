@@ -26,8 +26,13 @@ export const sessionRoutes: Route[] = [
       if (raw !== null && !/^\d+$/.test(raw)) {
         throw new ApiError(400, 'invalid_limit', 'limit must be a non-negative whole number.');
       }
+      // A title search: what the conversation drawer's search box asks.
+      const query = context.url.searchParams.get('q') ?? undefined;
+      if (query !== undefined && query.length > 200) {
+        throw new ApiError(400, 'invalid_query', 'q is a title search, at most 200 characters.');
+      }
       return {
-        sessions: context.gateway.store.list(agent, raw === null ? undefined : Number(raw)),
+        sessions: context.gateway.store.listTitled(agent, raw === null ? undefined : Number(raw), query),
       };
     },
   },
@@ -164,6 +169,10 @@ export const sessionRoutes: Route[] = [
       // Armed before the dispatch, so a failure that arrives while the runner
       // is still unwinding is seen rather than missed.
       const watch = context.watchTurn(sessionId, turnId);
+      // Held from here until the dispatch settles, so a stop reaches this
+      // turn while it is still queued or in its preflight, before the
+      // gateway has a controller of its own for it.
+      const held = context.dispatches.hold(sessionId, turnId);
       // Deliberately not awaited: a turn runs for as long as a model takes,
       // and the caller watches it on the event stream. The turn id returned
       // here is what lets them recognise it there.
@@ -173,6 +182,7 @@ export const sessionRoutes: Route[] = [
           ...(agentId ? { agentId } : {}),
           userMessage: message,
           turnId,
+          signal: held.signal,
           ...(metadata !== undefined ? { metadata } : {}),
         })
         .catch(async (error: unknown) => {
@@ -196,10 +206,52 @@ export const sessionRoutes: Route[] = [
               .catch(() => undefined);
           });
         })
-        .finally(() => watch.release());
+        .finally(() => {
+          watch.release();
+          held.release();
+        });
 
       context.response.statusCode = 202;
       return { sessionId, turnId };
+    },
+  },
+  {
+    method: 'POST',
+    pattern: `${API_PREFIX}/sessions/:id/stop`,
+    async handler(context) {
+      const sessionId = context.params.id ?? '';
+      // Both are the operator's own authority, as for a task's cancel: a
+      // browser session is the dashboard, a bearer token anything holding
+      // the daemon's token. The reason is what the stopped turn fails with,
+      // so it is what every surface showing the conversation reads.
+      const dashboard = context.principal?.kind === 'cookie';
+      const reason = dashboard ? 'Stopped from the dashboard.' : 'Stopped through the control API.';
+      // Slack's stop, without the chat: every turn on the session, a
+      // recovered one included, then the background tasks it started,
+      // since a person who says stop means those too. This API's own
+      // dispatches go first, queued ones included, so one waiting behind
+      // the turn being stopped never starts once that turn ends. A message
+      // another caller queued (a Slack thread) is left to that caller's
+      // own signal, as `abortTurns` leaves it.
+      // Which turn is running, read before anything is aborted: a running
+      // dispatch of ours is in both counts below, and only that one.
+      const active = context.gateway.activeTurnId(sessionId);
+      const ours = context.dispatches.abort(sessionId, reason);
+      const running = context.gateway.abortTurns(sessionId, reason);
+      // A first turn still in its preflight has no session yet, which is
+      // why this is checked only once nothing was held for it.
+      if (ours.length === 0 && running === 0 && context.gateway.store.statusOf(sessionId) === undefined) {
+        throw new ApiError(404, 'session_not_found', `No session with id ${sessionId}.`);
+      }
+      const tasks = context.gateway.stopTasks(sessionId, dashboard ? 'dashboard' : 'cli');
+      // Our held dispatches and the gateway's running turns overlap in at
+      // most the one running turn, when that is ours: another caller's
+      // running turn and ours queued behind it are separate turns, each
+      // stopped. Counted at once; nothing here waits for the stops to
+      // land. Nothing running is not an error, so a second click is
+      // harmless.
+      const overlap = active !== undefined && running > 0 && ours.includes(active) ? 1 : 0;
+      return { sessionId, stopped: ours.length + running - overlap, tasks: tasks.open, reason };
     },
   },
   {

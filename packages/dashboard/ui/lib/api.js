@@ -42,15 +42,17 @@ export const api = {
   updateAgent: (id, body) => request('PUT', `/agents/${encodeURIComponent(id)}`, body),
   deleteAgent: (id) => request('DELETE', `/agents/${encodeURIComponent(id)}`),
   reloadRoster: () => request('POST', '/roster/reload'),
-  sessions: (agent, limit) => {
+  sessions: (agent, limit, q) => {
     const query = new URLSearchParams();
     if (agent) query.set('agent', agent);
     if (limit) query.set('limit', String(limit));
+    if (q) query.set('q', q);
     const suffix = query.toString();
     return request('GET', `/sessions${suffix ? `?${suffix}` : ''}`);
   },
   session: (id) => request('GET', `/sessions/${encodeURIComponent(id)}`),
   send: (id, body) => request('POST', `/sessions/${encodeURIComponent(id)}/messages`, body),
+  stopSession: (id) => request('POST', `/sessions/${encodeURIComponent(id)}/stop`),
   approvals: () => request('GET', '/approvals'),
   resolveApproval: (body) => request('POST', '/approvals', body),
   models: () => request('GET', '/catalog/models'),
@@ -64,6 +66,7 @@ export const api = {
   removeSchedule: (id) => request('DELETE', `/schedules/${encodeURIComponent(id)}`),
   tasks: () => request('GET', '/tasks'),
   stopTask: (id) => request('POST', `/tasks/${encodeURIComponent(id)}/cancel`),
+  grantOwners: () => request('GET', '/grants'),
   grants: (agentId) => request('GET', `/agents/${encodeURIComponent(agentId)}/grants`),
   revokeGrant: (agentId, body) => request('POST', `/agents/${encodeURIComponent(agentId)}/grants/revoke`, body),
   config: () => request('GET', '/config'),

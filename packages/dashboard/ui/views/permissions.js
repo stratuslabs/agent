@@ -3,6 +3,7 @@ import { api } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { icon } from '../lib/icons.js';
 import { createLatest } from '../lib/latest.js';
+import { ownersUnknown } from '../lib/grants.js';
 import { store } from '../app.js';
 
 /**
@@ -71,7 +72,7 @@ const rowsFor = (agentId, listing) => [
 const REFRESH_MS = 3000;
 
 export const renderPermissions = () => {
-  const state = { rows: undefined, errors: [], confirming: undefined, busy: undefined, loadedAt: 0, trailing: undefined };
+  const state = { rows: undefined, errors: [], confirming: undefined, busy: undefined, loadedAt: 0, trailing: undefined, ownersListed: true };
   const reads = createLatest();
   const node = el('div', { class: 'page-scroll' });
 
@@ -79,20 +80,35 @@ export const renderPermissions = () => {
     // Latest-wins, so a reload after a revoke is never undone by the first read landing late.
     state.loadedAt = Date.now();
     const ticket = reads.begin();
-    const results = await Promise.all(store.agents.map((agent) => api.grants(agent.id).then(
-      (listing) => ({ rows: rowsFor(agent.id, listing) }),
-      (error) => ({ error: `${agent.name}: ${error.message}` }),
+    // Everyone with a grant file, so grants that outlived their agent are
+    // found too. A daemon that can't say (a store without owners: 501; an
+    // older daemon without the route: 404) leaves the roster as the list,
+    // and the page says what that misses.
+    const owners = await api.grantOwners().then(
+      (listed) => ({ ids: listed.agents ?? [] }),
+      (error) => ({ error }),
+    );
+    const ids = [...new Set([...store.agents.map((agent) => agent.id), ...(owners.ids ?? [])])];
+    const nameOf = (agentId) => store.agents.find((agent) => agent.id === agentId)?.name ?? agentId;
+    const results = await Promise.all(ids.map((agentId) => api.grants(agentId).then(
+      (listing) => ({ rows: rowsFor(agentId, listing) }),
+      (error) => ({ error: `${nameOf(agentId)}: ${error.message}` }),
     )));
     if (!reads.isCurrent(ticket)) {
       return;
     }
+    state.ownersListed = owners.error === undefined;
+    const ownersError = owners.error !== undefined && !ownersUnknown(owners.error) ? owners.error : undefined;
     state.rows = results.flatMap((result) => result.rows ?? []);
     // A confirmation whose grant is gone (revoked elsewhere) is dropped,
     // rather than left waiting to act on whatever now looks like it.
     if (state.confirming !== undefined && !state.rows.some((row) => !row.config && `${row.agentId}\u0000${JSON.stringify(row.revoke)}` === state.confirming)) {
       state.confirming = undefined;
     }
-    state.errors = results.flatMap((result) => (result.error ? [result.error] : []));
+    state.errors = [
+      ...(ownersError ? [`Couldn't list agents no longer on the roster: ${ownersError.message}`] : []),
+      ...results.flatMap((result) => (result.error ? [result.error] : [])),
+    ];
     paint();
   };
 
@@ -123,8 +139,12 @@ export const renderPermissions = () => {
     // different grant and revoke that one instead.
     const key = row.config ? undefined : `${row.agentId}\u0000${JSON.stringify(row.revoke)}`;
     return el('div', { class: 'list-row', style: `padding: 14px 0;${row.stale ? ' opacity: 0.8;' : ''}` },
-      agent ? avatar(agent, 24) : null,
-      el('div', { style: 'width: 110px; flex: none; font-weight: 500;' }, agent?.name ?? row.agentId),
+      agent ? avatar(agent, 24) : el('span', { class: 'avatar-gap', 'aria-hidden': 'true' }),
+      el('div', { style: 'width: 110px; flex: none; font-weight: 500; overflow-wrap: anywhere;' },
+        agent?.name ?? row.agentId,
+        // Its soul is gone and its grants stayed: still revocable, and the
+        // reason to look at this page at all.
+        agent ? null : el('div', { class: 'field-note', style: 'margin: 2px 0 0; font-weight: 400;' }, 'Not on the roster')),
       el('div', { class: 'text' },
         el('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
           el('span', { style: 'color: var(--text-2); font-size: 13px;' }, row.kind),
@@ -146,6 +166,12 @@ export const renderPermissions = () => {
 
   const paint = () => {
     const rows = state.rows ?? [];
+    // Only when the daemon couldn't list grant owners: then an agent removed
+    // from the roster isn't asked about, so neither the list nor "none" is
+    // the whole story.
+    const ownersNote = state.ownersListed
+      ? null
+      : el('p', { class: 'field-note' }, 'This daemon can’t list grants kept for agents no longer on the roster, so those aren’t shown.');
     node.replaceChildren(el('div', { class: 'page-body', style: 'max-width: 1040px;' },
       el('div', { class: 'page-head' }, el('div', {},
         el('h1', {}, 'Permissions'),
@@ -160,15 +186,14 @@ export const renderPermissions = () => {
           ? el('div', { class: 'empty-state' },
               el('span', { class: 'icon-box' }, icon('shield-check', 18)),
               el('h3', {}, 'No permissions yet'),
-              el('p', {}, 'When you choose “Always allow” on an approval, the grant shows up here so you can revoke it.'))
+              el('p', {}, 'When you choose “Always allow” on an approval, the grant shows up here so you can revoke it.'),
+              ownersNote)
           : el('div', {},
               el('div', { class: 'list' }, ...rows.map(rowNode)),
               el('div', { class: 'notice', style: 'margin-top: 20px; background: var(--bg); color: var(--text-2); display: flex; gap: 8px; align-items: center;' },
                 icon('shield-check', 14),
                 'Grants never widen on their own. Each row covers only what it says.'),
-              // The API lists grants per agent id and has no list of grant
-              // owners, so an agent removed from the roster is not asked about.
-              el('p', { class: 'field-note' }, 'Grants kept for agents no longer on the roster aren’t listed here.')),
+              ownersNote),
     ));
   };
 

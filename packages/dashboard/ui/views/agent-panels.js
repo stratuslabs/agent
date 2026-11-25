@@ -1,7 +1,7 @@
 import { el, when } from '../lib/dom.js';
 import { avatar } from '../lib/avatar.js';
 import { icon } from '../lib/icons.js';
-import { conversationTitle, firstLine, sourceOf } from '../lib/sources.js';
+import { conversationTitle, drawerSessions, firstLine, searchableTitle, sourceOf } from '../lib/sources.js';
 
 /**
  * The bar across the top of an agent: who it is, the Chat and Settings
@@ -46,18 +46,21 @@ const GROUPS = [
 
 /**
  * The conversation drawer: this agent's stored conversations, newest first,
- * grouped by day and filtered by the search box. `titles` holds the real
- * titles of conversations this page has opened (their first message); the
- * rest are named by where they came from until the session list carries a
- * title.
+ * grouped by day and filtered by the search box. Each is called by its title
+ * (its first message, from the listing or from this page's own read of it),
+ * or by where it came from when nothing has been said in it.
  */
-export const conversationDrawer = ({ current, sessions, sessionId, unsent, titles, schedules, search, onOpen, onClose }) => {
+export const conversationDrawer = ({ current, sessions, found, sessionId, unsent, titles, schedules, search, onOpen, onClose }) => {
   const now = new Date();
   const titleOf = (session) => titles.get(session.id) ?? conversationTitle(session, { schedules });
   // The box is the view's own node, kept across repaints like the composer,
   // so typing in it never loses the caret to an event from another agent.
-  const needle = search.value.trim().toLowerCase();
-  const shown = sessions.filter((session) => !needle || titleOf(session).toLowerCase().includes(needle));
+  const shown = drawerSessions({
+    sessions,
+    found,
+    query: search.value,
+    titleOf: (session) => titles.get(session.id) ?? searchableTitle(session, { schedules }),
+  });
   const grouped = new Map();
   for (const session of shown) {
     const date = new Date(session.updatedAt);

@@ -154,6 +154,8 @@ export {
   ShardedSessionStore,
   FleetSessionIndex,
   SessionIdTakenError,
+  SESSION_TITLE_MAX,
+  sessionTitle,
   tightenSqliteFile,
   type SqliteSessionStoreOptions,
   type ShardedSessionStoreOptions,

@@ -14,3 +14,12 @@ export const sourceOf: (sessionId: string, context?: SourceContext) => Source;
 export const firstLine: (text: unknown, max?: number) => string;
 /** A conversation's name in a list: its title, or where it came from. */
 export const conversationTitle: (session: { id: string; title?: string }, context?: SourceContext) => string;
+/** What a search box matches a conversation on: its whole title. */
+export const searchableTitle: (session: { id: string; title?: string }, context?: SourceContext) => string;
+/** The conversations the drawer shows for the text in its search box. */
+export const drawerSessions: <T extends { id: string; title?: string }>(input: {
+  sessions: T[];
+  found: { query: string; sessions: T[] } | undefined;
+  query: string;
+  titleOf: (session: T) => string;
+}) => T[];
