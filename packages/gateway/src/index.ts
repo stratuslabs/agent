@@ -3047,7 +3047,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       log(`intake is paused (since ${intakeState.since ?? 'unknown'}); new work will be refused until it resumes`);
     }
     const named = registry.list().map((agent) => agent.name).join(', ');
-    log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+    log(named ? `stratusd ready — ${registry.list().length} agent(s): ${named}` : 'stratusd ready — no agents yet');
     log(backgroundTasks.summary);
     {
       // Said at every start: a limit that stops turns should never be a

@@ -2542,10 +2542,12 @@ test('a turn that names no agent fails saying how to make one when there is no d
   const home = await bareHome();
   const warnings: string[] = [];
   const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
-  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  const logs: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line), log: (line) => logs.push(line) });
   await gateway.start();
   // No agent lives in code to answer for nobody.
   assert.deepEqual(gateway.agents(), []);
+  assert.ok(logs.includes('stratusd ready — no agents yet'), JSON.stringify(logs));
   assert.ok(warnings.some((line) => line.includes('no agents yet')), JSON.stringify(warnings));
   await assert.rejects(
     () => gateway.dispatch({ sessionId: 'nobody-1', userMessage: 'who are you' }),

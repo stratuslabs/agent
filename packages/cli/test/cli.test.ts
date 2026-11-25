@@ -4595,7 +4595,9 @@ test('runCli serve starts the gateway, prints a ready line, and drains on shutdo
   });
 
   assert.equal(code, 0);
-  assert.match(output.stdout, /stratusd ready — \d+ agent\(s\)/);
+  // A fresh home has no agents, and the ready line says so rather than
+  // listing nobody.
+  assert.match(output.stdout, /stratusd ready — no agents yet/);
   assert.match(output.stdout, /draining in-flight turns/);
   assert.match(output.stdout, /stratusd stopped/);
 });
