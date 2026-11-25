@@ -6015,6 +6015,48 @@ test('doctor against a real daemon: what it warned at start stays a problem afte
 });
 
 /**
+ * A daemon started before anyone made an agent: what `doctor` says while
+ * there is still none, and that it drops the start-up line once one exists,
+ * since the default soul is picked up on the next turn without a restart.
+ */
+test('doctor against a daemon that started with no agents names the fix, and drops it once an agent exists', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-doctor-noagents-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({}), { mode: 0o600 });
+  const controller = new AbortController();
+  const served = createStreams();
+  const serving = runCli({
+    argv: ['serve', '--no-events', '--api-port', '0'],
+    streams: served.streams,
+    env: { homeDir: home, cwd: home, processEnv: {}, shutdownSignal: controller.signal },
+  });
+  try {
+    for (let tries = 0; ; tries += 1) {
+      try {
+        await readFile(path.join(home, '.stratus', 'gateway.json'), 'utf8');
+        break;
+      } catch {
+        if (tries > 100) throw new Error(`daemon never published gateway.json: ${served.output.stdout}${served.output.stderr}`);
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    assert.match(served.output.stderr, /no agents yet/);
+    const before = createStreams();
+    const beforeCode = await runCli({ argv: ['doctor'], streams: before.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.equal(beforeCode, 1, before.output.stdout);
+    assert.match(before.output.stdout, /No agents yet, so the running daemon fails every turn it is handed\. Create one with `stratus setup` or `stratus agent new`\./);
+    assert.doesNotMatch(before.output.stdout, /warned at start: no agents yet/);
+
+    await addDefaultAgent(home);
+    const after = createStreams();
+    await runCli({ argv: ['doctor'], streams: after.streams, env: { homeDir: home, cwd: home, processEnv: {} } });
+    assert.doesNotMatch(after.output.stdout, /no agents yet/i, after.output.stdout);
+  } finally {
+    controller.abort();
+    await serving;
+  }
+});
+/**
  * A real daemon on a runnable home, bound where `apiHost` says (or left to
  * the default), with what `serve` printed and what `doctor` then said.
  */

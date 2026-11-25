@@ -282,6 +282,13 @@ const ignoredConfigKeyProblems = async (configPath: string): Promise<string[]> =
  * a restart would only read the same broken one and pause again.
  */
 const INTAKE_WARNING_PREFIX = 'intake: ';
+/**
+ * How the gateway's start-up line for an empty roster begins. Unlike the
+ * other start-up warnings it is not stale config a restart re-reads: the
+ * daemon picks up a default soul on its next turn, so once an agent exists
+ * the line is history, and while none does the fix is to make one.
+ */
+const NO_AGENTS_WARNING_PREFIX = 'no agents yet: ';
 
 /** What a daemon's /health said about each config file at start, keeping only well-formed entries. */
 const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | null }> =>
@@ -292,7 +299,7 @@ const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | nu
       })
     : [];
 
-const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<DoctorDaemon> => {
+const inspectDaemon = async (env: CliEnvironment, problems: string[], hasAgents: boolean): Promise<DoctorDaemon> => {
   // Read here rather than through readGatewayInfo, which folds a damaged
   // file into "none": only a missing file is the benign case.
   const infoPath = gatewayInfoPath(env);
@@ -358,6 +365,15 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   for (const line of warnings) {
     // A note under Daemon, not a problem: see EXPOSED_API_WARNING_PREFIX.
     if (line.startsWith(EXPOSED_API_WARNING_PREFIX)) {
+      continue;
+    }
+    if (line.startsWith(NO_AGENTS_WARNING_PREFIX)) {
+      if (!hasAgents) {
+        problems.push(
+          'No agents yet, so the running daemon fails every turn it is handed. '
+          + 'Create one with `stratus setup` or `stratus agent new`.',
+        );
+      }
       continue;
     }
     if (line.startsWith(INTAKE_WARNING_PREFIX)) {
@@ -1020,7 +1036,9 @@ export const collectDoctorReport = async (
     );
   }
 
-  const daemon = await inspectDaemon(env, problems);
+  // A roster that would not load is already a problem above, and no
+  // evidence that there are no agents.
+  const daemon = await inspectDaemon(env, problems, rosterIds.size > 0 || !rosterLoaded);
   // With no daemon answering, a stopped service is the finding the rest
   // wait on, so it goes first. A doctor run on a host whose daemon was down
   // led with a stray-souls warning instead.
