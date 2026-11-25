@@ -1,5 +1,6 @@
 import { CREDENTIAL_NAME_PATTERN } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
+import { helpTopic } from './help.ts';
 import type { ParsedHelpCommand } from './parse/shared.ts';
 import {
   parseChatCommand,
@@ -119,6 +120,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   const [command, ...rest] = argv;
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
+    // `stratus help <command>` for a command the help does not know is
+    // the same mistake as running it.
+    const [topic] = rest;
+    if (command === 'help' && topic !== undefined && !topic.startsWith('-') && helpTopic(rest) === undefined) {
+      throw new Error(`Unknown command: ${rest.join(' ')}`);
+    }
     return { command: 'help' };
   }
 
