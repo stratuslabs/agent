@@ -336,7 +336,7 @@ export const createControlApi = (options: ControlApiOptions = {}): ControlApi =>
       response.setHeader('content-type', 'text/html; charset=utf-8');
       response.setHeader('cache-control', 'no-store');
       response.end(
-        '<!doctype html><meta charset="utf-8"><title>Stratus</title>'
+        '<!doctype html><meta charset="utf-8"><title>Not signed in · Stratus Agent</title>'
         + '<body style="font-family:system-ui;background:#05070f;color:#f3f7ff;padding:3rem">'
         + '<h1>Not signed in</h1><p>Run <code>stratus dashboard</code> to open an authenticated session.</p>',
       );

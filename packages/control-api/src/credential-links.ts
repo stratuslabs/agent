@@ -224,7 +224,7 @@ export const sendCredentialPage = (
     '<!doctype html><html lang="en"><meta charset="utf-8">'
     + '<meta name="viewport" content="width=device-width, initial-scale=1">'
     + '<meta name="robots" content="noindex">'
-    + '<title>Stratus: add a credential</title>'
+    + '<title>Add a credential · Stratus Agent</title>'
     + '<style>body{font-family:system-ui,sans-serif;background:#05070f;color:#f3f7ff;margin:0;padding:2rem 1rem;line-height:1.5}'
     + 'main{max-width:32rem;margin:0 auto}code{font-size:.95em}label{display:block;margin:1.5rem 0 .4rem}'
     + 'textarea{box-sizing:border-box;width:100%;padding:.7rem;font-size:1rem;border-radius:.4rem;border:1px solid #3a4560;background:#0d1222;color:inherit;'
