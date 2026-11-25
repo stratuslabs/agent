@@ -1036,8 +1036,7 @@ export interface Gateway {
    */
   providers(): GatewayProviderStatus[];
   /**
-   * The soul behind each agent in the current roster, built-in included
-   * (which has none).
+   * The soul behind each agent in the current roster.
    *
    * The roster the daemon is *serving*, which the agents directory stops
    * describing the moment a soul is added, deleted, or broken since the last

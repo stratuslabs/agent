@@ -32,8 +32,11 @@ import {
 } from '@stratusagent/agents';
 import { SKILL_READ_TOOL_NAME, latestTurnReply } from '@stratusagent/core';
 import { createHomeMemoryStore, fleetDbIn, legacyMemoryFilePath } from '@stratusagent/state';
+import { withDefaultAgent } from './default-agent.ts';
 
-const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
+/** A home with no agent at all; `newHome` adds the default `stratus` agent. */
+const bareHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
+const newHome = async (): Promise<string> => withDefaultAgent(await bareHome());
 
 const writeSoul = async (home: string, file: string, contents: string): Promise<void> => {
   const dir = path.join(home, '.stratus', 'agents');
@@ -1399,6 +1402,7 @@ test('a mid-turn switch to a non-streaming fallback suspends the watchdog for th
   // switch must suspend the timer: the OpenAI fallback emits no deltas, and
   // its slow-but-healthy turn would otherwise be killed as a stall.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'anthropic',
     model: 'model-p',
     fallbackModel: 'model-f',
@@ -1605,6 +1609,7 @@ test('the watchdog arms when a streaming fallback takes over a non-streaming pri
   // mid-turn, the reset delta must arm it: a fallback stream that then
   // stalls has to be cut loose, not held open until an SDK timeout.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'openai',
     model: 'model-p',
     fallbackModel: 'model-f',
@@ -1691,7 +1696,7 @@ test('an agentId-less dispatch answers as the configured default soul', async ()
 });
 
 test('a configured default soul that would share a roster agent\'s directory is ignored', async () => {
-  const home = await newHome();
+  const home = await bareHome();
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   // A roster agent, and a config-only default declaring the same id in
   // another case. `loadRosterSouls` folds ids against each other, but it
@@ -1710,13 +1715,15 @@ test('a configured default soul that would share a roster agent\'s directory is 
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
-  // Dropped, not served: an agentId-less dispatch falls back to the
-  // built-in, which is the documented answer when there is no usable
-  // default — rather than running as a second agent on Ava's state.
-  const session = await gateway.dispatch({ sessionId: 'folded-default-1', userMessage: 'hello' });
+  // Dropped, not served: an agentId-less dispatch has no default, which
+  // is the documented answer when there is no usable one, rather than
+  // running as a second agent on Ava's state.
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'folded-default-1', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
   await gateway.stop();
 
-  assert.equal(session.agent.id, 'stratus');
   assert.match(warnings.join(' '), /same state directory as ava/);
   assert.match(warnings.join(' '), /rename one of the two ids/);
   // And the roster agent is untouched — this refuses the newcomer, it does
@@ -2097,7 +2104,7 @@ test('the gateway starts when daemon defaults lack credentials the default soul 
 });
 
 test('an unreadable default soul path degrades startup instead of failing it', async () => {
-  const home = await newHome();
+  const home = await bareHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'missing.md' }));
 
@@ -2106,12 +2113,14 @@ test('an unreadable default soul path degrades startup instead of failing it', a
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
-  // The default route falls back to the built-in agent, with a warning.
-  const session = await gateway.dispatch({ sessionId: 'missing-default-1', userMessage: 'hello' });
+  // The daemon is up; the default route has no agent, and says so, with a
+  // warning naming the soul it could not read.
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'missing-default-1', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
   await gateway.stop();
 
-  assert.equal(session.status, 'completed');
-  assert.equal(session.agent.id, 'stratus');
   assert.ok(warnings.some((line) => line.includes('default soul')), `expected a default-soul warning, got ${JSON.stringify(warnings)}`);
 });
 
@@ -2186,6 +2195,7 @@ test('the sticky-fallback switch is durable while the fallback is still in fligh
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'anthropic',
     model: 'model-p',
     fallbackModel: 'model-f',
@@ -2368,9 +2378,9 @@ test('WAL sidecars are owner-only for their whole lifetime, reopens included', a
   reopened.close();
 });
 
-test('removing the default soul updates the cached default to the built-in', async () => {
+test('removing the default soul leaves no default, and a broken config does not bring it back', async () => {
   const { unlink } = await import('node:fs/promises');
-  const home = await newHome();
+  const home = await bareHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
@@ -2384,20 +2394,27 @@ test('removing the default soul updates the cached default to the built-in', asy
 
   // The operator retires the default soul on purpose.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({}));
-  const asBuiltin = await gateway.dispatch({ sessionId: 'retire-2', userMessage: 'hello' });
-  assert.equal(asBuiltin.agent.id, 'stratus');
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'retire-2', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
 
-  // A later transient config failure must not resurrect Nova — the cached
-  // default is now the built-in.
+  // A later transient config failure must not resurrect Nova: the cached
+  // default is now none.
   await unlink(path.join(home, '.stratus', 'config.json'));
   await writeFile(path.join(home, '.stratus', 'config.json'), '{ broken');
-  const degraded = await gateway.dispatch({ sessionId: 'retire-3', userMessage: 'hello' });
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'retire-3', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
+  // The conversation Nova started keeps Nova.
+  const resumed = await gateway.dispatch({ sessionId: 'retire-1', userMessage: 'still there?' });
   await gateway.stop();
-  assert.equal(degraded.agent.id, 'stratus');
+  assert.equal(resumed.agent.name, 'Nova');
 });
 
 test('the generic key serves a pinned soul when nothing else selects a provider', async () => {
-  const home = await newHome();
+  const home = await bareHome();
   // No config.json, no env/selection provider: the soul is the only
   // provider selector, so STRATUS_API_KEY is its credential — the
   // resolver's own reading of a generic key.
@@ -2521,27 +2538,31 @@ test('a config-only default soul with no tools: list is named too, and a roster-
   assert.equal(once.filter((line) => line.includes('has no tools: list')).length, 1, JSON.stringify(once));
 });
 
-test('a roster soul cannot hijack the reserved built-in agent id', async () => {
-  const home = await newHome();
-  // A roster file whose name slugifies to the reserved id "stratus".
-  await writeSoul(home, 'imposter.md', '---\nname: Stratus\nprovider: openai\nmodel: model-x\n---\n\nI am an imposter.\n');
-
+test('a turn that names no agent fails saying how to make one when there is no default', async () => {
+  const home = await bareHome();
   const warnings: string[] = [];
   const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
-
-  // The agentId-less route stays the documented built-in fallback.
-  const session = await gateway.dispatch({ sessionId: 'reserved-1', userMessage: 'who are you' });
-  await gateway.stop();
-
-  assert.equal(session.status, 'completed');
-  assert.match(session.agent.instructions ?? '', /Stratus Agent platform/);
-  assert.ok(!(session.agent.instructions ?? '').includes('imposter'));
-  assert.ok(
-    warnings.some((line) => line.includes('reserved for the built-in agent')),
-    `expected a reservation warning, got ${JSON.stringify(warnings)}`,
+  // No agent lives in code to answer for nobody.
+  assert.deepEqual(gateway.agents(), []);
+  assert.ok(warnings.some((line) => line.includes('no agents yet')), JSON.stringify(warnings));
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'nobody-1', userMessage: 'who are you' }),
+    /No agent to answer this turn.*stratus setup.*stratus agent new/,
   );
+
+  // An agent on the roster is not made the default by being the only one:
+  // the default is what the config says.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await gateway.reloadRoster();
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'nobody-2', userMessage: 'who are you' }),
+    /No agent to answer this turn/,
+  );
+  const named = await gateway.dispatch({ sessionId: 'named-1', agentId: 'ava', userMessage: 'who are you' });
+  await gateway.stop();
+  assert.equal(named.agent.id, 'ava');
 });
 
 // ---- approval brokering ---------------------------------------------------
@@ -3320,10 +3341,10 @@ test('a duplicate agent id stops the daemon starting, rather than picking a winn
   await gateway.stop();
 });
 
-test('a soul claiming the built-in id is still skipped, not treated as a collision', async () => {
-  const home = await newHome();
+test('a soul declaring the id stratus is an agent like any other', async () => {
+  const home = await bareHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  await writeSoul(home, 'impostor.md', '---\nname: Impostor\nid: stratus\n---\n\nYou are an impostor.\n');
+  await writeSoul(home, 'friend.md', '---\nname: Old Friend\nid: stratus\n---\n\nYou are an old friend.\n');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
 
   const warnings: string[] = [];
@@ -3333,15 +3354,15 @@ test('a soul claiming the built-in id is still skipped, not treated as a collisi
     selection: { provider: 'demo' },
     warn: (line) => warnings.push(line),
   });
-  // Reserved is not duplicated. The built-in fallback is documented, so a
-  // roster file must not be able to take it over — and must not be able to
-  // take the daemon down by trying.
+  // No id is held back for an agent that lives in code: none does.
   await gateway.start();
   const ids = gateway.agents().map((agent) => agent.id).sort();
   assert.deepEqual(ids, ['ava', 'stratus']);
-  assert.equal(gateway.agents().find((agent) => agent.id === 'stratus')?.name, 'Stratus');
-  assert.ok(warnings.some((line) => line.includes('reserved')), JSON.stringify(warnings));
+  assert.equal(gateway.agents().find((agent) => agent.id === 'stratus')?.name, 'Old Friend');
+  assert.ok(!warnings.some((line) => line.includes('reserved')), JSON.stringify(warnings));
+  const session = await gateway.dispatch({ sessionId: 'friend-1', agentId: 'stratus', userMessage: 'hello' });
   await gateway.stop();
+  assert.equal(session.agent.name, 'Old Friend');
 });
 
 test('a hosted tool phase holds the watchdog, on a provider that never announces its calls', async () => {
@@ -5419,6 +5440,7 @@ test('a keyed turn on a session switched for good to a stateless fallback is not
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'anthropic',
     model: 'model-p',
     fallbackModel: 'model-f',
