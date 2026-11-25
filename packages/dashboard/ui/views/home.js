@@ -27,8 +27,8 @@ export const sessionBadge = (status) => {
 const offlineBanner = () => el('div', { class: 'banner', role: 'status' },
   icon('unplug', 16),
   el('div', {},
-    el('div', { class: 'title' }, `Can’t reach Stratus since ${clock(new Date(store.offlineSince).toISOString())}. What you see may be out of date.`),
-    el('div', { class: 'detail' }, 'Start it again on the machine running Stratus, for example with ', el('code', {}, 'stratus service start'), '. This page reconnects on its own.')));
+    el('div', { class: 'title' }, `Can’t reach Stratus Agent since ${clock(new Date(store.offlineSince).toISOString())}. What you see may be out of date.`),
+    el('div', { class: 'detail' }, 'Start it again on the machine running Stratus Agent, for example with ', el('code', {}, 'stratus service start'), '. This page reconnects on its own.')));
 
 const agentCard = (agent) => {
   const status = statusOf(agent);
@@ -102,7 +102,7 @@ export const renderHome = () => {
         el('button', { class: 'link', onClick: () => { store.notices = store.notices.filter((other) => other.id !== notice.id); update(); } }, 'Dismiss'))),
       el('div', { class: `page-head${offline ? ' stale' : ''}` },
         el('div', {},
-          el('h1', {}, store.sessions.length === 0 && agents.length <= 1 ? 'Welcome to Stratus' : greeting()),
+          el('h1', {}, store.sessions.length === 0 && agents.length <= 1 ? 'Welcome to Stratus Agent' : greeting()),
           el('div', { class: 'sub' }, `${statusLine(agents, { approvals: store.approvals, runtimes: store.health?.runtimes })}${uptime}`)),
         fresh ? el('button', { class: 'btn primary', onClick: () => navigate({ name: 'agent', agentId: fresh.id, fresh: true }) }, 'New chat') : null),
       el('div', { class: offline ? 'stale' : '', style: 'display: flex; flex-direction: column; gap: 10px;' },

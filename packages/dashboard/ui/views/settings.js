@@ -430,7 +430,7 @@ export const renderSettings = (section) => {
       } else if (stored.reason) {
         say('channels', `Saved. ${stored.reason}${note}`, 'bad');
       } else {
-        say('channels', `Saved. Restart Stratus to bring that agent online in Slack.${note}`, note ? 'bad' : 'ok');
+        say('channels', `Saved. Restart Stratus Agent to bring that agent online in Slack.${note}`, note ? 'bad' : 'ok');
       }
       state.busy = false; update();
     };
@@ -499,7 +499,7 @@ export const renderSettings = (section) => {
       }
       chosen = undefined;
       const note = await reread(['config']);
-      say('approvals', `Saved to config.json. Restart Stratus (stratus restart) so every agent picks it up.${note}`, note ? 'bad' : 'ok');
+      say('approvals', `Saved to config.json. Restart Stratus Agent (stratus restart) so every agent picks it up.${note}`, note ? 'bad' : 'ok');
       state.busy = false; update();
     };
 
