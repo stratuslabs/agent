@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lstat, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { createFileCommandWhitelist } from '@stratusagent/permissions';
@@ -218,7 +218,7 @@ test('a new agent can claim a deleted id only once the old one is cleaned up, an
   }
 });
 
-test('a schedule a racing turn makes after the first sweep is cancelled once the roster has reloaded', async () => {
+test('a schedule and a grant a racing turn makes after the first cleanup are taken back once the roster has reloaded', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', AVA);
   const agents = path.join(home, '.stratus', 'agents');
@@ -237,9 +237,11 @@ test('a schedule a racing turn makes after the first sweep is cancelled once the
       if (key === 'grantsFor' && block) {
         return async (agentId: string) => {
           block = false;
+          // The snapshot is taken first: a grant made during the hold isn't in it.
+          const listing = await target.grantsFor(agentId);
           entered();
           await gate;
-          return target.grantsFor(agentId);
+          return listing;
         };
       }
       return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
@@ -253,14 +255,106 @@ test('a schedule a racing turn makes after the first sweep is cancelled once the
     const deleting = harness.call('/api/v1/agents/ava', { method: 'DELETE' });
     await reached;
     await scheduleFor(home, 'sched-ava-late', 'ava');
+    await grants.rememberTool('ava', { tool: 'demo.echo', grantedAt: '2026-11-25T00:00:00.000Z' });
     release();
     const removed = await deleting;
     assert.equal(removed.status, 200);
-    assert.deepEqual((await json<{ schedulesCancelled: string[] }>(removed)).schedulesCancelled, ['sched-ava', 'sched-ava-late']);
+    const body = await json<{ schedulesCancelled: string[]; grantsRevoked: number }>(removed);
+    assert.deepEqual(body.schedulesCancelled, ['sched-ava', 'sched-ava-late']);
+    assert.equal(body.grantsRevoked, 1);
     const schedules = await json<{ schedules: Array<{ id: string }> }>(await harness.call('/api/v1/schedules'));
     assert.deepEqual(schedules.schedules.map((schedule) => schedule.id), ['sched-stratus']);
+    const after = await json<{ tools: unknown[] }>(await harness.call('/api/v1/agents/ava/grants'));
+    assert.deepEqual(after.tools, []);
   } finally {
     release();
+    await harness.stop();
+  }
+});
+
+test('a cleanup step that fails after the move still reloads, stops racing turns and sweeps again', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', AVA);
+  const agents = path.join(home, '.stratus', 'agents');
+  const grants = createFileCommandWhitelist({ directory: agents, stateHome: path.join(home, '.stratus') });
+  // The first grant read is held, then fails the way a disk error would.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  let calls = 0;
+  const failing = new Proxy(grants, {
+    get(target, key) {
+      const value = Reflect.get(target, key) as unknown;
+      if (key === 'grantsFor') {
+        return async (agentId: string) => {
+          calls += 1;
+          if (calls === 1) {
+            entered();
+            await gate;
+            throw Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO' });
+          }
+          return target.grantsFor(agentId);
+        };
+      }
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+
+  const harness = await startApi({ home, options: { grants: failing } });
+  try {
+    await scheduleFor(home, 'sched-ava', 'ava');
+    const deleting = harness.call('/api/v1/agents/ava', { method: 'DELETE' });
+    await reached;
+    await scheduleFor(home, 'sched-ava-late', 'ava');
+    release();
+    const removed = await deleting;
+    assert.ok(removed.status >= 500, `the failure is reported (got ${removed.status})`);
+    // The soul moved, so the agent is gone from the roster anyway, and the
+    // second sweep ran: no schedule is left for it.
+    const roster = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/agents'));
+    assert.ok(!roster.agents.some((agent) => agent.id === 'ava'));
+    const schedules = await json<{ schedules: Array<{ id: string }> }>(await harness.call('/api/v1/schedules'));
+    assert.deepEqual(schedules.schedules.map((schedule) => schedule.id), []);
+    assert.equal(calls, 2, 'the second cleanup read the grants again');
+  } finally {
+    release();
+    await harness.stop();
+  }
+});
+
+test('a soul whose link cannot be removed after the move still leaves the roster', { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder' : false }, async () => {
+  const home = await newHome();
+  const agentsFolder = path.join(home, 'Agents');
+  const agents = path.join(home, '.stratus', 'agents');
+  await mkdir(path.join(agentsFolder, 'ava'), { recursive: true });
+  await writeFile(path.join(agentsFolder, '.stratus-agents'), 'This folder is managed by Stratus.\n');
+  await writeFile(path.join(agentsFolder, 'ava', 'soul.md'), AVA);
+  await mkdir(agents, { recursive: true });
+  await symlink(path.join(agentsFolder, 'ava', 'soul.md'), path.join(agents, 'ava.md'));
+
+  const harness = await startApi({ home, env: { processEnv: { STRATUS_PROVIDER: 'demo', STRATUS_AGENTS_DIR: agentsFolder } } });
+  try {
+    await scheduleFor(home, 'sched-ava', 'ava');
+    // The visible folder is writable and the link's directory isn't: the
+    // soul moves to the archive, then removing the link fails.
+    await chmod(agents, 0o500);
+    const removed = await harness.call('/api/v1/agents/ava', { method: 'DELETE' });
+    await chmod(agents, 0o700);
+    assert.ok(removed.status >= 500, `the failure is reported (got ${removed.status})`);
+    assert.ok(!(await readdir(path.join(agentsFolder, 'ava'))).includes('soul.md'), 'the soul moved');
+    const roster = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/agents'));
+    assert.ok(!roster.agents.some((agent) => agent.id === 'ava'), 'not served from a cached definition');
+    const message = await harness.call('/api/v1/sessions/web%3Aava%3Ax/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hello', agentId: 'ava' }),
+    });
+    assert.equal(message.status, 404);
+    const schedules = await json<{ schedules: Array<{ id: string }> }>(await harness.call('/api/v1/schedules'));
+    assert.deepEqual(schedules.schedules.map((schedule) => schedule.id), []);
+  } finally {
+    await chmod(agents, 0o700).catch(() => undefined);
     await harness.stop();
   }
 });

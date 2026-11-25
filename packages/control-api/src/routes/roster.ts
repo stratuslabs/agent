@@ -377,21 +377,39 @@ export const rosterRoutes: Route[] = [
     pattern: `${API_PREFIX}/agents/:id`,
     async handler(context) {
       const agentId = context.params.id ?? '';
-      // Under the soul lock, like an edit: a field edit already in flight
-      // would otherwise write the soul back after it had moved aside. The
-      // schedules and grants go under it too, because creating an agent
-      // takes the same lock: a new agent given this id can't appear until
-      // they're gone, so the cleanup never reaches it.
-      let moved = false;
-      let done: { soulMovedTo: string; schedulesCancelled: string[]; grantsRevoked?: number; grantsNote?: string };
       // Its schedules would fail at every firing with no agent to run, so
       // they go; a cancel also revokes the destination grant on the row.
       const cancelSchedules = (): string[] => context.gateway.schedules()
         .filter((record) => record.agentId === agentId)
         .map((record) => record.id)
         .filter((id) => context.gateway.cancelSchedule(id));
+      // And its standing grants: a new agent later given this id must ask
+      // again, not inherit what this one was allowed. An unreadable grant
+      // file already honors no grant, and the soul can't move back from
+      // here, so that is said rather than thrown.
+      const revokeGrants = async (): Promise<{ revoked: number; note?: string }> => {
+        if (!context.grants) {
+          return { revoked: 0 };
+        }
+        try {
+          return { revoked: await revokeEveryGrant(context.grants, agentId) };
+        } catch (error) {
+          if (!(error instanceof WhitelistUnreadableError)) {
+            throw error;
+          }
+          return { revoked: 0, note: error.message };
+        }
+      };
+      // Under the soul lock, like an edit: a field edit already in flight
+      // would otherwise write the soul back after it had moved aside. The
+      // schedules and grants go under it too, because creating an agent
+      // takes the same lock: a new agent given this id can't appear until
+      // they're gone, so the cleanup never reaches it.
+      let mayHaveMoved = false;
+      let failure: unknown;
+      let first: { soulMovedTo: string; schedulesCancelled: string[]; grants: { revoked: number; note?: string } } | undefined;
       try {
-        done = await withSoulFileLock(async () => {
+        first = await withSoulFileLock(async () => {
           const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
           const summary = summariesById(summaries).get(agentId);
           if (!summary || !context.gateway.agents().some((agent) => agent.id === agentId)) {
@@ -425,60 +443,63 @@ export const rosterRoutes: Route[] = [
               `${agentId} has ${active} conversation${active === 1 ? '' : 's'} running or waiting on an approval. Stop ${active === 1 ? 'it' : 'them'} or answer the approval, then delete it.`,
             );
           }
+          // From here the soul may have moved even if a step throws (the
+          // archive can land and the link's removal fail), so the reload and
+          // the second cleanup below run whatever happens. Both are harmless
+          // if it never moved: the agent is still on the roster then.
+          mayHaveMoved = true;
           // Moved aside, never deleted: putting it back restores the agent.
           const soulMovedTo = await retireSoulFile(context.env, summary.soulPath, agentId);
-          moved = true;
-          const schedulesCancelled = cancelSchedules();
-          // And its standing grants: a new agent later given this id must ask
-          // again, not inherit what this one was allowed.
-          if (!context.grants) {
-            return { soulMovedTo, schedulesCancelled };
-          }
-          try {
-            return { soulMovedTo, schedulesCancelled, grantsRevoked: await revokeEveryGrant(context.grants, agentId) };
-          } catch (error) {
-            if (!(error instanceof WhitelistUnreadableError)) {
-              throw error;
-            }
-            // The soul has moved and can't move back from here, so this is
-            // said rather than thrown: the file is unreadable, which already
-            // honors no grant.
-            return { soulMovedTo, schedulesCancelled, grantsNote: error.message };
-          }
+          return { soulMovedTo, schedulesCancelled: cancelSchedules(), grants: await revokeGrants() };
         });
-      } finally {
-        // Off the roster and out of every channel, so it stops answering at
-        // once: from here a dispatch to it is refused. Also after a failure
-        // past the move, so the daemon never keeps serving a soul that's gone.
-        if (moved) {
-          await context.gateway.reloadRosterAndChannels();
+      } catch (error) {
+        if (!mayHaveMoved) {
+          throw error;
+        }
+        failure = error;
+      }
+      // Off the roster and out of every channel, so it stops answering at
+      // once: from here a dispatch to it is refused, and nothing new can be
+      // made for it (a schedule checks the roster right before it's written).
+      await context.gateway.reloadRosterAndChannels();
+      // A turn that started between the busy check and that reload was
+      // refused by neither. It ran on with the soul it had cached, and may
+      // have made a schedule, or a grant through an "Always allow", after
+      // the cleanup above. So it's stopped, and the cleanup runs once more
+      // now that nothing can add to it: also after a failed step above, so
+      // that can't leave a racing turn running. Under the lock, so no new
+      // agent takes the id meanwhile; and not at all if the id is on the
+      // roster (a new agent claimed it, or the soul never moved), because
+      // then what runs under it is its own.
+      let late: { schedulesCancelled: string[]; grants: { revoked: number; note?: string } } | undefined;
+      try {
+        late = await withSoulFileLock(async () => {
+          if (context.gateway.agents().some((agent) => agent.id === agentId)) {
+            return undefined;
+          }
+          for (const row of context.gateway.store.list(agentId)) {
+            if (row.status === 'running' || row.status === 'pending_approval') {
+              context.gateway.abortTurns(row.id, `${agentId} was deleted.`);
+            }
+          }
+          return { schedulesCancelled: cancelSchedules(), grants: await revokeGrants() };
+        });
+      } catch (error) {
+        // The first failure is the one to report; this one followed it.
+        if (failure === undefined) {
+          throw error;
         }
       }
-      // A turn that started between the busy check above and that reload is
-      // refused by neither: it runs on with the soul it had cached, and can
-      // make a schedule after the sweep above. From the reload on, nothing
-      // can (dispatch refuses the agent, and a schedule checks the roster
-      // right before it's written), so the turn is stopped and the sweep
-      // runs once more. Under the lock, so no new agent takes the id
-      // meanwhile; and not at all if one already has, because then what
-      // runs under the id is its own.
-      const lateSchedules = await withSoulFileLock(async () => {
-        if (context.gateway.agents().some((agent) => agent.id === agentId)) {
-          return [];
-        }
-        for (const row of context.gateway.store.list(agentId)) {
-          if (row.status === 'running' || row.status === 'pending_approval') {
-            context.gateway.abortTurns(row.id, `${agentId} was deleted.`);
-          }
-        }
-        return cancelSchedules();
-      });
+      if (failure !== undefined || first === undefined) {
+        throw failure;
+      }
+      const grantsNote = first.grants.note ?? late?.grants.note;
       return {
         agentId,
-        soulMovedTo: done.soulMovedTo,
-        schedulesCancelled: [...done.schedulesCancelled, ...lateSchedules],
-        ...(done.grantsRevoked !== undefined ? { grantsRevoked: done.grantsRevoked } : {}),
-        ...(done.grantsNote !== undefined ? { grantsNote: done.grantsNote } : {}),
+        soulMovedTo: first.soulMovedTo,
+        schedulesCancelled: [...first.schedulesCancelled, ...(late?.schedulesCancelled ?? [])],
+        ...(context.grants && grantsNote === undefined ? { grantsRevoked: first.grants.revoked + (late?.grants.revoked ?? 0) } : {}),
+        ...(grantsNote !== undefined ? { grantsNote } : {}),
       };
     },
   },
