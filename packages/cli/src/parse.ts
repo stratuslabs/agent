@@ -135,6 +135,10 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   // it through `update --check` was the only way to see it, which asks npm
   // over the network to answer a question about this machine.
   if (command === 'version' || command === '--version' || command === '-v') {
+    // Its help, like any command's; the version is one word away.
+    if (command === 'version' && (rest[0] === '--help' || rest[0] === '-h')) {
+      return { command: 'help' };
+    }
     return { command: 'version' };
   }
 

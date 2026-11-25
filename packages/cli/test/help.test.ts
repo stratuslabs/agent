@@ -102,7 +102,8 @@ test('a family name or an also-form finds the help it means', async () => {
 test('every word the help resolves runs as --help', async () => {
   // A form the help answers for and the CLI rejects would send someone
   // from a usage error to a second one.
-  const commands = sectionNames(HELP_TEXT, 'Commands:').filter((name) => name !== 'help' && name !== 'version');
+  // `help --help` is the whole help, the one form that is meant to be.
+  const commands = sectionNames(HELP_TEXT, 'Commands:').filter((name) => name !== 'help');
   const forms = new Set([
     ...commands.map((name) => name.split(' ')[0] ?? ''),
     'agent list', 'schedule', 'schedule list', 'schedule cancel', 'plugin', 'plugin list',
@@ -122,7 +123,7 @@ test('every command in the help has a help of its own, and every option is in on
   assert.ok(commands.length > 40, `read the Commands section (${commands.length})`);
   const listed = new Set<string>();
   for (const name of commands) {
-    if (name === 'help' || name === 'version') {
+    if (name === 'help') {
       continue;
     }
     const argv = [...name.split(' '), '--help'];
