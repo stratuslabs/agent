@@ -97,6 +97,9 @@ export const renderHome = () => {
 
     const body = el('div', { class: `page-body${offline ? '' : ''}` },
       offline ? offlineBanner() : null,
+      ...store.notices.map((notice) => el('div', { class: 'notice bad', role: 'alert', style: 'display: flex; gap: 12px; align-items: flex-start; margin-bottom: 14px;' },
+        el('span', { style: 'flex: 1; min-width: 0;' }, notice.text),
+        el('button', { class: 'link', onClick: () => { store.notices = store.notices.filter((other) => other.id !== notice.id); update(); } }, 'Dismiss'))),
       el('div', { class: `page-head${offline ? ' stale' : ''}` },
         el('div', {},
           el('h1', {}, store.sessions.length === 0 && agents.length <= 1 ? 'Welcome to Stratus' : greeting()),

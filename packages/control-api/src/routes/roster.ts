@@ -222,7 +222,9 @@ export const rosterRoutes: Route[] = [
       }
 
       const notes: string[] = [];
-      const claimed = await claimSoulFile(
+      // Under the soul lock, so an id a delete has just freed can't be
+      // claimed until that delete has taken back its schedules and grants.
+      const claimed = await withSoulFileLock(() => claimSoulFile(
         context.env,
         { ...(name ? { name } : {}), instructions },
         (agent) => formatSoul({
@@ -232,7 +234,7 @@ export const rosterRoutes: Route[] = [
         }),
         (message) => notes.push(message),
         context.configPath,
-      );
+      ));
 
       // The new soul is dispatchable immediately: 07 creates an agent and
       // expects to talk to it without restarting the daemon.
@@ -376,85 +378,99 @@ export const rosterRoutes: Route[] = [
     async handler(context) {
       const agentId = context.params.id ?? '';
       // Under the soul lock, like an edit: a field edit already in flight
-      // would otherwise write the soul back after it had moved aside.
-      const retired = await withSoulFileLock(async () => {
-        const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
-        const summary = summariesById(summaries).get(agentId);
-        if (!summary || !context.gateway.agents().some((agent) => agent.id === agentId)) {
-          throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
-        }
-        if (summary.builtIn || !summary.soulPath) {
-          throw new ApiError(409, 'agent_not_removable', `${agentId} is the built-in agent, which has no soul file and can't be deleted.`);
-        }
-        // The config names this soul (`soul`), so the daemon would refuse
-        // to start without it. The fix is in the config, not here.
-        if (summary.default) {
-          throw new ApiError(
-            409,
-            'agent_not_removable',
-            `${agentId} is the default agent your config names (its soul setting points at ${summary.soulPath}). Point the config at another soul, or remove that setting, then delete it.`,
-          );
-        }
-        // Only a soul on the roster's own directory: anything else is a
-        // file this daemon was pointed at, not one it owns.
-        if (path.resolve(path.dirname(summary.soulPath)) !== path.resolve(agentsDirPath(context.env))) {
-          throw new ApiError(409, 'agent_not_removable', `${agentId}'s soul is ${summary.soulPath}, outside the agents directory, so it isn't this daemon's to move.`);
-        }
-        // A running turn, or one parked on an approval, belongs to somebody.
-        // Stop or answer it first; deleting under it would leave the person
-        // waiting on an agent that no longer exists.
-        const active = context.gateway.store.lastActivityByAgent()[agentId]?.activeSessions ?? 0;
-        if (active > 0) {
-          throw new ApiError(
-            409,
-            'agent_busy',
-            `${agentId} has ${active} conversation${active === 1 ? '' : 's'} running or waiting on an approval. Stop ${active === 1 ? 'it' : 'them'} or answer the approval, then delete it.`,
-          );
-        }
-        // Moved aside, never deleted: putting it back restores the agent.
-        return retireSoulFile(context.env, summary.soulPath, agentId);
-      });
-      // Off the roster and out of every channel before anything else, so it
-      // stops answering at once: from here a dispatch to it is refused.
-      await context.gateway.reloadRosterAndChannels();
-      // A turn that started between the busy check above and that reload
-      // is not refused by either, and would run on with the soul it had
-      // cached while its grants went. Stopped, so a delete that answers has
-      // stopped the agent everywhere.
-      for (const row of context.gateway.store.list(agentId)) {
-        if (row.status === 'running' || row.status === 'pending_approval') {
-          context.gateway.abortTurns(row.id, `${agentId} was deleted.`);
+      // would otherwise write the soul back after it had moved aside. The
+      // schedules and grants go under it too, because creating an agent
+      // takes the same lock: a new agent given this id can't appear until
+      // they're gone, so the cleanup never reaches it.
+      let moved = false;
+      let done: { soulMovedTo: string; schedulesCancelled: string[]; grantsRevoked?: number; grantsNote?: string };
+      try {
+        done = await withSoulFileLock(async () => {
+          const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
+          const summary = summariesById(summaries).get(agentId);
+          if (!summary || !context.gateway.agents().some((agent) => agent.id === agentId)) {
+            throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
+          }
+          if (summary.builtIn || !summary.soulPath) {
+            throw new ApiError(409, 'agent_not_removable', `${agentId} is the built-in agent, which has no soul file and can't be deleted.`);
+          }
+          // The config names this soul (`soul`), so the daemon would refuse
+          // to start without it. The fix is in the config, not here.
+          if (summary.default) {
+            throw new ApiError(
+              409,
+              'agent_not_removable',
+              `${agentId} is the default agent your config names (its soul setting points at ${summary.soulPath}). Point the config at another soul, or remove that setting, then delete it.`,
+            );
+          }
+          // Only a soul on the roster's own directory: anything else is a
+          // file this daemon was pointed at, not one it owns.
+          if (path.resolve(path.dirname(summary.soulPath)) !== path.resolve(agentsDirPath(context.env))) {
+            throw new ApiError(409, 'agent_not_removable', `${agentId}'s soul is ${summary.soulPath}, outside the agents directory, so it isn't this daemon's to move.`);
+          }
+          // A running turn, or one parked on an approval, belongs to somebody.
+          // Stop or answer it first; deleting under it would leave the person
+          // waiting on an agent that no longer exists.
+          const active = context.gateway.store.lastActivityByAgent()[agentId]?.activeSessions ?? 0;
+          if (active > 0) {
+            throw new ApiError(
+              409,
+              'agent_busy',
+              `${agentId} has ${active} conversation${active === 1 ? '' : 's'} running or waiting on an approval. Stop ${active === 1 ? 'it' : 'them'} or answer the approval, then delete it.`,
+            );
+          }
+          // Moved aside, never deleted: putting it back restores the agent.
+          const soulMovedTo = await retireSoulFile(context.env, summary.soulPath, agentId);
+          moved = true;
+          // Its schedules would fail at every firing with no agent to run,
+          // so they go; a cancel also revokes the destination grant on the row.
+          const schedulesCancelled = context.gateway.schedules()
+            .filter((record) => record.agentId === agentId)
+            .map((record) => record.id)
+            .filter((id) => context.gateway.cancelSchedule(id));
+          // And its standing grants: a new agent later given this id must ask
+          // again, not inherit what this one was allowed.
+          if (!context.grants) {
+            return { soulMovedTo, schedulesCancelled };
+          }
+          try {
+            return { soulMovedTo, schedulesCancelled, grantsRevoked: await revokeEveryGrant(context.grants, agentId) };
+          } catch (error) {
+            if (!(error instanceof WhitelistUnreadableError)) {
+              throw error;
+            }
+            // The soul has moved and can't move back from here, so this is
+            // said rather than thrown: the file is unreadable, which already
+            // honors no grant.
+            return { soulMovedTo, schedulesCancelled, grantsNote: error.message };
+          }
+        });
+      } finally {
+        // Off the roster and out of every channel, so it stops answering at
+        // once: from here a dispatch to it is refused. Also after a failure
+        // past the move, so the daemon never keeps serving a soul that's gone.
+        if (moved) {
+          await context.gateway.reloadRosterAndChannels();
         }
       }
-      // Its schedules would fail at every firing with no agent to run, so
-      // they go; a cancel also revokes the destination grant on the row.
-      const schedulesCancelled = context.gateway.schedules()
-        .filter((record) => record.agentId === agentId)
-        .map((record) => record.id)
-        .filter((id) => context.gateway.cancelSchedule(id));
-      // And its standing grants: a new agent later given this id must ask
-      // again, not inherit what this one was allowed.
-      let grantsRevoked: number | undefined;
-      let grantsNote: string | undefined;
-      if (context.grants) {
-        try {
-          grantsRevoked = await revokeEveryGrant(context.grants, agentId);
-        } catch (error) {
-          if (!(error instanceof WhitelistUnreadableError)) {
-            throw error;
+      // A turn that started between the busy check above and that reload
+      // is not refused by either, and would run on with the soul it had
+      // cached. Stopped, so a delete that answers has stopped the agent
+      // everywhere. Unless the id is on the roster again: then a new agent
+      // claimed it once the cleanup was done, and those turns are its own.
+      if (!context.gateway.agents().some((agent) => agent.id === agentId)) {
+        for (const row of context.gateway.store.list(agentId)) {
+          if (row.status === 'running' || row.status === 'pending_approval') {
+            context.gateway.abortTurns(row.id, `${agentId} was deleted.`);
           }
-          // The soul has moved and can't move back from here, so this is
-          // said rather than thrown: the file is unreadable, which already
-          // honors no grant.
-          grantsNote = error.message;
         }
       }
       return {
         agentId,
-        soulMovedTo: retired,
-        schedulesCancelled,
-        ...(grantsRevoked !== undefined ? { grantsRevoked } : {}),
-        ...(grantsNote !== undefined ? { grantsNote } : {}),
+        soulMovedTo: done.soulMovedTo,
+        schedulesCancelled: done.schedulesCancelled,
+        ...(done.grantsRevoked !== undefined ? { grantsRevoked: done.grantsRevoked } : {}),
+        ...(done.grantsNote !== undefined ? { grantsNote: done.grantsNote } : {}),
       };
     },
   },

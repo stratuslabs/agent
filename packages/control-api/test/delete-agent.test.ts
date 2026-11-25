@@ -158,3 +158,94 @@ test('an agent with a very long id is archived under a name that still fits', as
     await harness.stop();
   }
 });
+
+test('a new agent can claim a deleted id only once the old one is cleaned up, and starts without its grants', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', AVA);
+  const agents = path.join(home, '.stratus', 'agents');
+  const grants = createFileCommandWhitelist({ directory: agents, stateHome: path.join(home, '.stratus') });
+  await grants.rememberTool('ava', { tool: 'demo.echo', grantedAt: '2026-11-24T00:00:00.000Z' });
+  // Holds the delete inside its grant cleanup, the slowest step, once.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  let block = true;
+  const held = new Proxy(grants, {
+    get(target, key) {
+      const value = Reflect.get(target, key) as unknown;
+      if (key === 'grantsFor' && block) {
+        return async (agentId: string) => {
+          block = false;
+          entered();
+          await gate;
+          return target.grantsFor(agentId);
+        };
+      }
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+
+  const harness = await startApi({ home, options: { grants: held } });
+  try {
+    await scheduleFor(home, 'sched-ava', 'ava');
+    const deleting = harness.call('/api/v1/agents/ava', { method: 'DELETE' });
+    await reached;
+    const creating = harness.call('/api/v1/agents', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Ava', instructions: 'You are the new Ava.' }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The id isn't free while the old Ava's schedules and grants are still
+    // being taken back: a new soul now would be the one they were taken from.
+    assert.ok(!(await readdir(agents)).includes('ava.md'), 'no new soul under the id mid-delete');
+    release();
+    const [removed, created] = await Promise.all([deleting, creating]);
+    assert.equal(removed.status, 200);
+    assert.deepEqual((await json<{ schedulesCancelled: string[] }>(removed)).schedulesCancelled, ['sched-ava']);
+    assert.equal(created.status, 201);
+    assert.equal((await json<{ agent: { id: string } }>(created)).agent.id, 'ava');
+
+    // The new Ava is on the roster, and asks for what the old one had.
+    const roster = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/agents'));
+    assert.ok(roster.agents.some((agent) => agent.id === 'ava'));
+    const after = await json<{ tools: unknown[] }>(await harness.call('/api/v1/agents/ava/grants'));
+    assert.deepEqual(after.tools, []);
+  } finally {
+    release();
+    await harness.stop();
+  }
+});
+
+test('a delete whose grants could not be revoked still answers, and says so', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', AVA);
+  const agents = path.join(home, '.stratus', 'agents');
+  const grants = createFileCommandWhitelist({ directory: agents, stateHome: path.join(home, '.stratus') });
+  await grants.rememberTool('ava', { tool: 'demo.echo', grantedAt: '2026-11-24T00:00:00.000Z' });
+  const { WhitelistUnreadableError } = await import('@stratusagent/permissions');
+  // The file went bad after the daemon read it: the revoke's write is refused.
+  const refusing = new Proxy(grants, {
+    get(target, key) {
+      if (key === 'forgetTool') {
+        return async () => { throw new WhitelistUnreadableError(path.join(agents, 'ava', 'whitelist.json'), 'Unexpected token'); };
+      }
+      const value = Reflect.get(target, key) as unknown;
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+  const harness = await startApi({ home, options: { grants: refusing } });
+  try {
+    const removed = await harness.call('/api/v1/agents/ava', { method: 'DELETE' });
+    assert.equal(removed.status, 200);
+    const body = await json<{ grantsRevoked?: number; grantsNote?: string }>(removed);
+    assert.equal(body.grantsRevoked, undefined);
+    assert.match(body.grantsNote ?? '', /could not be read/);
+    // The soul still moved and the roster still reloaded.
+    const roster = await json<{ agents: Array<{ id: string }> }>(await harness.call('/api/v1/agents'));
+    assert.ok(!roster.agents.some((agent) => agent.id === 'ava'));
+  } finally {
+    await harness.stop();
+  }
+});

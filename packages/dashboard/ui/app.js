@@ -43,6 +43,12 @@ export const store = {
   stream: 'connecting',
   /** Set when the daemon stops answering, so the page says so instead of going stale. */
   offlineSince: undefined,
+  /**
+   * What a finished action still needs the person to know after its page
+   * went away, such as a deleted agent whose grants couldn't be revoked.
+   * Home shows each until it's dismissed. `{ id, text }`.
+   */
+  notices: [],
 };
 
 const listeners = new Set();

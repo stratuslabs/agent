@@ -590,8 +590,7 @@ export const retireSoulFile = async (
   const archive = path.join(stratusHomePath(env), REMOVED_AGENTS_DIRNAME);
   await assertDerivedStatePath(stratusHomePath(env), archive, 'directory');
   await mkdir(archive, { recursive: true, mode: 0o700 });
-  const stamp = now.toISOString().replace(/[:.]/g, '-');
-  const destination = path.join(archive, `${archiveStem(agentId)}-${stamp}.md`);
+  const destination = await freeArchivePath(archive, `${archiveStem(agentId)}-${now.toISOString().replace(/[:.]/g, '-')}`);
   const entry = await lstat(soulPath);
   const agentsHome = resolveAgentsHome(env);
   if (entry.isSymbolicLink() && agentsHome !== undefined) {
@@ -611,6 +610,22 @@ export const retireSoulFile = async (
   await syncDirectory(path.dirname(soulPath));
   await syncDirectory(archive);
   return destination;
+};
+
+/**
+ * The first archive name not already taken: `<stem>.md`, then `<stem>-2.md`
+ * and on. A rename replaces whatever is at its destination, so the same id
+ * retired twice in one millisecond would otherwise land on the first
+ * archive. Checked then used without a race, because every retire runs
+ * under the soul lock.
+ */
+const freeArchivePath = async (archive: string, stem: string): Promise<string> => {
+  for (let attempt = 1; ; attempt += 1) {
+    const candidate = path.join(archive, `${stem}${attempt === 1 ? '' : `-${attempt}`}.md`);
+    if (await lstatOrUndefined(candidate) === undefined) {
+      return candidate;
+    }
+  }
 };
 
 /**

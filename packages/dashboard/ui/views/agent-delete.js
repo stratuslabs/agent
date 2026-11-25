@@ -19,13 +19,23 @@ export const createDeleteSection = ({ agentId, agentName }) => {
     state.busy = true;
     state.error = undefined;
     paint();
+    let result;
     try {
-      await api.deleteAgent(agentId);
+      result = await api.deleteAgent(agentId);
     } catch (error) {
       state.busy = false;
       state.error = error.message;
       paint();
       return;
+    }
+    // Deleted, but its grant file couldn't be read, so its grants weren't
+    // revoked. That outlives this page: a new agent given the same id
+    // would inherit them once the file reads again. Home keeps saying so.
+    if (typeof result?.grantsNote === 'string') {
+      store.notices = [...store.notices, {
+        id: `delete-${agentId}-${Date.now()}`,
+        text: `${agentName()} was deleted, but its permissions weren't revoked. ${result.grantsNote} Once it reads again, revoke them in Permissions, or a new agent given the id ${agentId} would inherit them.`,
+      }];
     }
     // Off the roster now; the page it was on goes with it.
     await Promise.allSettled([refreshCore(), refreshSchedules()]);
