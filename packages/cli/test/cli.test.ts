@@ -7376,7 +7376,10 @@ test('doctor blames the setting that actually selected demo', async () => {
     },
   });
 
-  assert.match(output.stdout, /Unset STRATUS_PROVIDER; it outranks both your config and any soul/);
+  assert.match(output.stdout, /Unset STRATUS_PROVIDER; it outranks your config file, and in `stratus run` any soul too\./);
+  // The daemon demotes the variable for an agent whose soul pins a provider,
+  // so "any soul" alone would misdescribe every pinned agent it serves.
+  assert.match(output.stdout, /Under `stratus serve` an agent whose soul pins a provider runs on its pin instead\./);
   assert.doesNotMatch(output.stdout, /Run `stratus setup` → Providers and sign in/);
 });
 
