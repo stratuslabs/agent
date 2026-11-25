@@ -65,6 +65,7 @@ export const api = {
   removeSchedule: (id) => request('DELETE', `/schedules/${encodeURIComponent(id)}`),
   tasks: () => request('GET', '/tasks'),
   stopTask: (id) => request('POST', `/tasks/${encodeURIComponent(id)}/cancel`),
+  grantOwners: () => request('GET', '/grants'),
   grants: (agentId) => request('GET', `/agents/${encodeURIComponent(agentId)}/grants`),
   revokeGrant: (agentId, body) => request('POST', `/agents/${encodeURIComponent(agentId)}/grants/revoke`, body),
   config: () => request('GET', '/config'),

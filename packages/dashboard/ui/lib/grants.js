@@ -31,3 +31,12 @@ export const alwaysOffer = (always, agentName) => {
       return undefined;
   }
 };
+
+/**
+ * Whether a failed GET /grants means the daemon can't list grant owners at
+ * all, so the roster stays the list (with a note), rather than an error to
+ * show. A grant store that can't enumerate owners answers 501; an older
+ * daemon has no such route and its router answers 404 not_found.
+ */
+export const ownersUnknown = (error) => error?.status === 501
+  || (error?.status === 404 && error?.code === 'not_found');

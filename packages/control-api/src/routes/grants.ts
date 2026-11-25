@@ -37,6 +37,25 @@ export const grantRoutes: Route[] = [
   // ---- grants --------------------------------------------------------------
   {
     method: 'GET',
+    pattern: `${API_PREFIX}/grants`,
+    async handler(context) {
+      const store = grantStoreOf(context);
+      if (!store.owners) {
+        throw new ApiError(
+          501,
+          'grant_owners_unavailable',
+          'This daemon\'s grant store cannot list whose grants it holds. GET /agents/:id/grants still answers for an id you know.',
+        );
+      }
+      // Ids only, and only ones that are ids: a file someone dropped in the
+      // agents directory by hand names nobody `GET /agents/:id/grants`
+      // could answer for. Off the roster or on it, alike: a grant outlives
+      // its agent, and this is how an operator finds the ones that did.
+      return { agents: (await store.owners()).filter((agentId) => isValidAgentId(agentId)) };
+    },
+  },
+  {
+    method: 'GET',
     pattern: `${API_PREFIX}/agents/:id/grants`,
     async handler(context) {
       const agentId = validGrantsAgentId(context.params.id);
