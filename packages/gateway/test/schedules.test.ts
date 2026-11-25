@@ -2214,3 +2214,45 @@ test('through the gateway: schedules.maxConcurrentByAgent lets two of one agent\
   assert.equal(await peakWith({ maxConcurrentByAgent: { ava: 2 } }), 2, 'ava\'s two schedules run side by side');
   assert.equal(await peakWith({}), 1, 'without a limit of its own, ava takes them in turn');
 });
+
+test('who approved a schedule or trigger is kept with it, read back with its prompt, and absent when nobody did', async () => {
+  const home = await newHome();
+  const store = new SqliteScheduleStore(path.join(home, 'sessions.db'));
+  const runtime = runtimeWith(store, {
+    // Only creation is exercised: the trigger needs a configured source, not a running intake.
+    events: { store: {} as never, sources: () => ['github'] },
+  });
+  const sessionOn = (scheduleId: string): Session => {
+    const now = new Date().toISOString();
+    return {
+      id: `schedule:${scheduleId}:x`,
+      agent: { id: 'ava', name: 'ava' },
+      status: 'running',
+      messages: [],
+      createdAt: now,
+      updatedAt: now,
+      metadata: { [SCHEDULE_ID_METADATA_KEY]: scheduleId },
+    };
+  };
+
+  const approved = await runtime.handle.create({
+    agentId: 'ava', cadence: { kind: 'every', intervalMs: 60_000 }, prompt: 'post the notes', trust: 'external', approvedBy: 'U-APPROVER',
+  });
+  const trigger = await runtime.handle.create({
+    agentId: 'ava', cadence: { kind: 'event', source: 'github', filter: parseEventFilter({ exact: { type: 'push' } }) }, prompt: 'look at pushes', trust: 'external', approvedBy: 'terminal',
+  });
+  const unapproved = await runtime.handle.create({
+    agentId: 'ava', cadence: { kind: 'every', intervalMs: 60_000 }, prompt: 'post the notes', trust: 'external',
+  });
+
+  assert.equal(store.get(approved.id)?.approvedBy, 'U-APPROVER');
+  assert.equal(store.get(trigger.id)?.approvedBy, 'terminal');
+  assert.equal(store.get(unapproved.id)?.approvedBy, undefined);
+  assert.deepEqual(runtime.firingPromptFor(sessionOn(approved.id)), { kind: 'schedule', prompt: 'post the notes', trust: 'external', approvedBy: 'U-APPROVER' });
+  assert.deepEqual(runtime.firingPromptFor(sessionOn(trigger.id)), { kind: 'trigger', prompt: 'look at pushes', trust: 'external', approvedBy: 'terminal' });
+  assert.deepEqual(runtime.firingPromptFor(sessionOn(unapproved.id)), { kind: 'schedule', prompt: 'post the notes', trust: 'external' });
+  // A row written before approvals were recorded reads as unapproved.
+  store.insert(record({ id: 'older', trust: 'external' }));
+  assert.deepEqual(runtime.firingPromptFor(sessionOn('older')), { kind: 'schedule', prompt: 'check the repo', trust: 'external' });
+  store.close();
+});

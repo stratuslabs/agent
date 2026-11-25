@@ -165,9 +165,10 @@ export interface ReviewCaseInput {
   /**
    * A live schedule or event-trigger firing's own prompt: the whole request
    * for that turn. The firing's message also carries the events, which came
-   * from outside and never count as the request.
+   * from outside and never count as the request. `approvedBy` is set when a
+   * person approved the call that set the schedule (`ScheduleRecord.approvedBy`).
    */
-  firing?: { kind: 'schedule' | 'trigger'; prompt: string; trust?: TrustLevel };
+  firing?: { kind: 'schedule' | 'trigger'; prompt: string; trust?: TrustLevel; approvedBy?: string };
   /**
    * A run another agent started (an `agent.spawn` sub-agent or an
    * `agent.delegate` sub-session), whose request is the delegating agent's
@@ -181,6 +182,15 @@ const requestOf = (input: ReviewCaseInput): { who: string; text: string } => {
   if (input.firing !== undefined) {
     const what = input.firing.kind === 'trigger' ? 'an event trigger\'s prompt' : 'a schedule\'s prompt';
     if (input.firing.trust === 'external') {
+      if (input.firing.approvedBy !== undefined) {
+        // A person was shown this exact prompt and said yes to setting it,
+        // so it is theirs now, whatever the conversation had read.
+        return {
+          who: `${what}, approved by a person when it was set; the conversation that wrote it had read outside content`
+            + `${input.firing.kind === 'trigger' ? '; the events it delivered are not part of the request' : ''}`,
+          text: input.firing.prompt,
+        };
+      }
       // Written in a conversation that had read outside content, so the
       // prompt may be that content's: it can't vouch for any call.
       return { who: `${what}, set by a conversation that had read outside content, so it is not counted`, text: '' };

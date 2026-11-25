@@ -143,10 +143,10 @@ test('only a person\'s yes to this call names who gave it, for the runner to han
   };
 
   // A remote answer that names its approver, one that names nobody, and the terminal prompt.
-  const named = await decide(createPermissionPolicy({ mode: 'remote', request: async () => ({ answer: 'allow', actor: 'U-APPROVER' }) }));
+  const named = await decide(createPermissionPolicy({ mode: 'remote', request: async () => ({ answer: 'once', actor: 'U-APPROVER' }) }));
   assert.equal(named.ran, true);
   assert.deepEqual(named.reported.map((decision) => [decision.layer, decision.approvedBy]), [['approver', 'U-APPROVER']]);
-  assert.equal((await decide(createPermissionPolicy({ mode: 'remote', request: async () => 'allow' }))).reported.at(-1)?.approvedBy, 'remote');
+  assert.equal((await decide(createPermissionPolicy({ mode: 'remote', request: async () => 'once' }))).reported.at(-1)?.approvedBy, 'remote');
   assert.equal((await decide(createPermissionPolicy({ mode: 'interactive', ask: async () => 'y' }))).reported.at(-1)?.approvedBy, 'terminal');
 
   // "always" is a yes to this call; the calls its grant covers afterwards are not.
@@ -161,7 +161,7 @@ test('only a person\'s yes to this call names who gave it, for the runner to han
   const refused = await decide(createPermissionPolicy({ mode: 'remote', request: async () => ({ answer: 'deny', actor: 'U-APPROVER' }) }));
   assert.equal(refused.ran, false);
   assert.equal(refused.reported.at(-1)?.approvedBy, undefined);
-  const open = await decide(createPermissionPolicy({ mode: 'remote', openFor: () => true, request: async () => ({ answer: 'allow', actor: 'U-APPROVER' }) }));
+  const open = await decide(createPermissionPolicy({ mode: 'remote', openFor: () => true, request: async () => ({ answer: 'once', actor: 'U-APPROVER' }) }));
   assert.equal(open.ran, true);
   assert.ok(open.reported.every((decision) => decision.approvedBy === undefined));
 });

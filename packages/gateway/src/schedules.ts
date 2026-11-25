@@ -562,7 +562,7 @@ export interface SchedulerRuntime {
    * (live, or resumed after a restart), so metadata alone never names a
    * prompt.
    */
-  firingPromptFor(session: Session): { kind: 'schedule' | 'trigger'; prompt: string; trust: TrustLevel } | undefined;
+  firingPromptFor(session: Session): { kind: 'schedule' | 'trigger'; prompt: string; trust: TrustLevel; approvedBy?: string } | undefined;
   /** All agents' schedules, for the operator surfaces. */
   list(): ScheduleRecord[];
   /** Cancel any agent's schedule — the operator's stop button. */
@@ -780,6 +780,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       createdAt: clock().toISOString(),
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(input.trust ? { trust: input.trust } : {}),
+      ...(input.approvedBy ? { approvedBy: input.approvedBy } : {}),
     };
     insertForRosterAgent(record);
     log(`event trigger ${record.id} created for ${record.agentId} on source ${input.cadence.source}${record.destination ? `, reports to ${canonicalDestination(record.destination)}` : ''}`);
@@ -814,6 +815,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         createdAt: now.toISOString(),
         ...(input.createdBy ? { createdBy: input.createdBy } : {}),
         ...(input.trust ? { trust: input.trust } : {}),
+        ...(input.approvedBy ? { approvedBy: input.approvedBy } : {}),
         nextFireAt: next.toISOString(),
       };
       insertForRosterAgent(record);
@@ -1513,7 +1515,12 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       if (record === undefined || record.agentId !== session.agent.id) {
         return undefined;
       }
-      return { kind: record.cadence.kind === 'event' ? 'trigger' : 'schedule', prompt: record.prompt, trust: record.trust ?? 'unknown' };
+      return {
+        kind: record.cadence.kind === 'event' ? 'trigger' : 'schedule',
+        prompt: record.prompt,
+        trust: record.trust ?? 'unknown',
+        ...(record.approvedBy !== undefined ? { approvedBy: record.approvedBy } : {}),
+      };
     },
     approvalDestinationFor(session) {
       if (!activeFirings.has(session.id)) {

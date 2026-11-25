@@ -588,7 +588,7 @@ test('a shadow review\'s logged reason is redacted before it is cut, so no part 
 
 test('under the review posture only a person\'s yes names who gave it: never a rule, the reviewer, the unreviewed run or a shadow', async () => {
   const ext = sessionFor('ava', true);
-  const yes = async (): Promise<{ answer: 'allow'; actor: string }> => ({ answer: 'allow', actor: 'U-APPROVER' });
+  const yes = async (): Promise<{ answer: 'once'; actor: string }> => ({ answer: 'once', actor: 'U-APPROVER' });
 
   const ruled = harness({ rules: [rule({ tool: 'notes.*', verdict: 'allow' })] }, allowing, { mode: 'remote', request: yes });
   const byRule = await ruled.decide(notes, ext);
