@@ -2344,7 +2344,8 @@ test('setup signs into Claude with a pasted API key, verifies it, and saves cred
   assert.equal(requests[0]?.headers['x-api-key'], 'sk-ant-test-key');
 
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
-  assert.deepEqual(config, { provider: 'anthropic', model: 'claude-opus-5-5' });
+  // Setup made the first agent, since there was none, and the default.
+  assert.deepEqual(config, { provider: 'anthropic', model: 'claude-opus-5-5', soul: path.join(home, '.stratus', 'agents', 'stratus.md') });
 
   const credentialsFile = path.join(home, '.stratus', 'credentials.json');
   const credentials = JSON.parse(await readFile(credentialsFile, 'utf8'));
@@ -2519,7 +2520,7 @@ test('setup demo path can test run inline before saving', async () => {
   assert.match(output.stdout, /\[assistant\] Demo provider ready/);
 
   const config = JSON.parse(await readFile(path.join(home, '.stratus', 'config.json'), 'utf8'));
-  assert.deepEqual(config, { provider: 'demo' });
+  assert.deepEqual(config, { provider: 'demo', soul: path.join(home, '.stratus', 'agents', 'stratus.md') });
 });
 
 test('setup test run writes in the language the saved config would run in', async () => {
@@ -2917,7 +2918,7 @@ test('setup honors STRATUS_CONFIG and --config for the write target', async () =
   });
   assert.match(viaEnv.output.stdout, /STRATUS_CONFIG is set, so the config will be written to/);
   const envWritten = JSON.parse(await readFile(envConfigPath, 'utf8'));
-  assert.deepEqual(envWritten, { provider: 'anthropic', model: 'claude-opus-5-5' });
+  assert.deepEqual(envWritten, { provider: 'anthropic', model: 'claude-opus-5-5', soul: path.join(home, '.stratus', 'agents', 'stratus.md') });
 
   const viaFlag = createStreams();
   await runCli({
@@ -3077,6 +3078,7 @@ test('setup Models menu picks default and fallback from live available models', 
   assert.deepEqual(config, {
     provider: 'anthropic',
     model: 'claude-sonnet-5',
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     fallbackModel: 'gpt-4.1-mini',
     fallbackProvider: 'openai',
     fallbackBaseUrl: 'https://local.test/v1',
@@ -4749,7 +4751,7 @@ test('setup re-asks for a malformed member ID and warns when nobody is listed', 
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → tokens → a display name (refused) → Enter (skip) → Back → Save & finish
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'dylan\n', '\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', 'dylan\n', '\n', '2\n', '9\n']),
       fetch: slackOkFetch,
     },
   });
@@ -4778,7 +4780,7 @@ test('setup treats a separators-only answer as no answer, and names the agent\'s
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ', ,\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', ', ,\n', '2\n', '9\n']),
       fetch: slackOkFetch,
     },
   });
@@ -4808,7 +4810,7 @@ test('setup leaves an existing principals list alone when connecting another age
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // No agent on Slack confirms which workspace U0OPS is in, so Ava is
       // asked (Codex P2 4310305742); Enter keeps the inherited list.
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '9\n']),
       fetch: slackOkFetch,
     },
   });
@@ -4846,7 +4848,7 @@ const connectAvaBesideBea = async (beaTeam: string, answers: string[]) => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '2\n', '9\n']),
       fetch: slackTeamsFetch(beaTeam),
     },
   });
@@ -4883,7 +4885,7 @@ test('setup keeps a first list to the agent when another Slack agent is in a dif
         homeDir: home,
         processEnv: {},
         serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-        setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', 'U0AVA\n', '3\n', '9\n']),
+        setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', 'U0AVA\n', '2\n', '9\n']),
         fetch: slackTeamsFetch(beaTeam),
       },
     }), 0);
@@ -4919,7 +4921,7 @@ const reconnectAva = async (oldTeam: string, answers: string[]) => {
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → Replace the tokens → new tokens → answers → Back → Save & finish
-      setupInput: Readable.from(['5\n', '2\n', '1\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', '1\n', 'xapp-t\n', 'xoxb-t\n', ...answers, '2\n', '9\n']),
       fetch: fetchImpl,
     },
   }), 0);
@@ -5093,7 +5095,7 @@ test('setup connects an agent to Slack without touching any file by hand', async
       // Channels → Ava (1, the only agent) → paste both tokens → Back →
       // Save & finish
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '1\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0DYLAN\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0DYLAN\n', '2\n', '9\n']),
       fetch: (async (url: any, init?: any) => {
         slackCalls.push({
           url: String(url),
@@ -5154,9 +5156,9 @@ test('setup keeps a later agent\'s Slack list to that agent when another agent h
       cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-setup-')),
       homeDir: home,
       processEnv: {},
-      // Channels → Bea (3) → paste both tokens → member ID → Back → Save & finish
+      // Channels → Bea (2) → paste both tokens → member ID → Back → Save & finish
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '3\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0BEA\n', '4\n', '9\n']),
+      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-tok\n', 'U0BEA\n', '3\n', '9\n']),
       fetch: (async (url: any) => {
         if (String(url).endsWith('/auth.test')) {
           return new Response(JSON.stringify({ ok: true, user_id: 'B456', team: 'Acme', team_id: 'T1' }), { status: 200 });
@@ -5187,7 +5189,7 @@ test('setup refuses to store Slack tokens the API rejects', async () => {
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-tok\n', 'xoxb-bad\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-tok\n', 'xoxb-bad\n', '2\n', '9\n']),
       // Slack answers 200 with ok:false for a bad token.
       fetch: (async () => new Response(JSON.stringify({ ok: false, error: 'invalid_auth' }), { status: 200 })) as typeof fetch,
     },
@@ -5215,7 +5217,7 @@ test('setup rejects malformed Slack tokens before calling the API', async () => 
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '2\n', 'xoxb-wrong-kind\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xoxb-wrong-kind\n', '2\n', '9\n']),
       fetch: (async () => { called += 1; return new Response('{}', { status: 200 }); }) as typeof fetch,
     },
   });
@@ -5248,7 +5250,7 @@ test('setup disconnects an agent from Slack', async () => {
       processEnv: {},
       // Channels → Ava (connected) → Disconnect → Back → Save & finish
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '2\n', '2\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', '2\n', '2\n', '9\n']),
     },
   });
 
@@ -5265,8 +5267,9 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agentsDir, 'bea.md'), '---\nname: Bea\n---\n\nYou are Bea.\n');
   // Ava is bound by the plugin's own config, with no secret — the shape a
-  // channel that needs none takes. The built-in agent is not bound at all.
+  // channel that needs none takes. Bea is not bound at all.
   await writeFile(
     path.join(home, '.stratus', 'config.json'),
     `${JSON.stringify({ plugins: { 'stratus-plugin-fixture-channel': { agents: { ava: {} } } } })}\n`,
@@ -5285,9 +5288,9 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      // Channels → fixture → Stratus → Store secrets → "token" → value →
+      // Channels → fixture → Bea → Store secrets → "token" → value →
       // Back → Back → Save & finish
-      setupInput: Readable.from(['5\n', '2\n', '1\n', '1\n', 'token\n', 'fixture-token-1\n', '3\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '2\n', '2\n', '1\n', 'token\n', 'fixture-token-1\n', '3\n', '3\n', '9\n']),
     },
   });
 
@@ -5295,14 +5298,14 @@ test('setup shows a plugin channel bound by config or by secrets, and stores its
   assert.match(output.stdout, /Channels\s+Slack: 1 agent connected; also fixture/);
   assert.match(output.stdout, /fixture\s+from stratus-plugin-fixture-channel/);
   assert.match(output.stdout, /Ava \(ava\)\s+✓ in its plugin config/);
-  assert.match(output.stdout, /Stratus \(stratus\)\s+— not connected/);
-  assert.match(output.stdout, /Stratus \(stratus\)\s+✓ secrets: token/);
+  assert.match(output.stdout, /Bea \(bea\)\s+— not connected/);
+  assert.match(output.stdout, /Bea \(bea\)\s+✓ secrets: token/);
   assert.ok(!output.stdout.includes('fixture-token-1'), 'setup printed a secret');
 
   const credentials = JSON.parse(await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8'));
   assert.deepEqual(credentials.channels, {
     slack: { ava: { appToken: 'xapp-keep', botToken: 'xoxb-keep' } },
-    fixture: { stratus: { token: 'fixture-token-1' } },
+    fixture: { bea: { token: 'fixture-token-1' } },
   });
 });
 
@@ -5504,7 +5507,7 @@ test('setup suggests serve with the same --config it was run with', async () => 
       processEnv: {},
       serviceSystemdBooted: true,
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -5539,7 +5542,7 @@ test('setup ends by saying how to bring Slack online when nothing will run strat
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → tokens → no member ID → Back → Always on → "Do not run it for me" → Save.
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '7\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '7\n', '3\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -5578,7 +5581,7 @@ test('setup on Linux without systemd ends by saying how to bring Slack online', 
       serviceSystemdBooted: false,
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
       // Channels → Ava → tokens → no member ID → Back → Save.
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '9\n']),
       fetch: (async (url: any) => new Response(JSON.stringify(
         String(url).endsWith('/auth.test')
           ? { ok: true, user_id: 'B1', team: 'Acme', team_id: 'T1' }
@@ -5609,7 +5612,7 @@ test('setup reloads a running daemon once the channel secrets are written, and s
       homeDir: home,
       processEnv: {},
       serviceRunner: stubServiceRunner, serviceSleep: noServiceWait,
-      setupInput: Readable.from(['5\n', '2\n', 'xapp-t\n', 'xoxb-t\n', '\n', '3\n', '9\n']),
+      setupInput: Readable.from(['5\n', '1\n', 'xapp-t\n', 'xoxb-t\n', '\n', '2\n', '9\n']),
       fetch: (async (url: any) => {
         if (String(url).endsWith('/api/v1/roster/reload')) {
           // Asked only once the tokens are on disk, so the reload can read them.
@@ -8023,6 +8026,9 @@ test('a job loaded from this home, even through a symlink, or no job at all, is 
 
 test('setup enables a plugin and writes the setting it is useless without', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  // The agent setup makes first, which the Plugins screen judges.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'stratus.md'), STRATUS_SOUL);
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   const { streams, output } = createStreams();
 
@@ -8700,6 +8706,9 @@ test('setup refuses a configured package that is not a plugin at all', async () 
 
 test('setup does not call a plugin callable by an agent its required setting misses', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  // The agent setup makes first, which the Plugins screen judges.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'stratus.md'), STRATUS_SOUL);
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   // Ava has the roots; the built-in `stratus` agent is seeded into every
@@ -8920,6 +8929,9 @@ test('setup refuses to enable a plugin whose preserved settings a daemon would r
 
 test('setup says what it did not check when enabling a plugin it could not have configured', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  // The agent setup makes first, which the Plugins screen judges.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'stratus.md'), STRATUS_SOUL);
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   // Object-shaped, so setup offers Enable — and the entry is still one the
   // bridge refuses, because a server needs exactly one of `command` or
@@ -9491,6 +9503,9 @@ test('setup can set approvers before the Slack adapter is installed', async () =
 
 test('setup does not report a flat denial when the control API answers for another agent', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  // The agent setup makes first, which the verdict is about.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'stratus.md'), STRATUS_SOUL);
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   // `ava` has tokens but no approvers, so Slack denies on arrival. The
@@ -9528,6 +9543,9 @@ test('setup does not report a flat denial when the control API answers for anoth
 
 test('setup puts the whole approval verdict on the screen that sets it', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  // The agent setup makes first, which the verdict is about.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'stratus.md'), STRATUS_SOUL);
   const agentsDir = path.join(home, '.stratus', 'agents');
   await mkdir(agentsDir, { recursive: true });
   await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\n---\n\nYou are Ava.\n');
@@ -9767,6 +9785,9 @@ test('setup falls back to the index it shipped with when npm has none', async ()
 
 test('setup says remote approvals deny everything while no agent is connected to Slack', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  // The agent setup makes first, which the verdict is about.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'stratus.md'), STRATUS_SOUL);
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   const { streams, output } = createStreams();
 
@@ -9795,6 +9816,9 @@ test('setup says remote approvals deny everything while no agent is connected to
 
 test('setup says remote approvals are denied when nothing can answer them at all', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  // The agent setup makes first, which the verdict is about.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'stratus.md'), STRATUS_SOUL);
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
     provider: 'anthropic',
