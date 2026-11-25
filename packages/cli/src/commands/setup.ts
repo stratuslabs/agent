@@ -16,7 +16,9 @@ import {
   resolveRuntimeConfig,
   DEFAULT_CONFIG_FILENAME,
   loadConfigFile,
+  loadRosterSouls,
   saveChannelCredentials,
+  stratusPersona,
   saveChannelTransportSecrets,
   removeChannelTransportSecrets,
   saveConfigFile,
@@ -266,18 +268,76 @@ export const runSetup = async (
     channelRoster,
   });
 
-  const agentSummary = (): string => {
-    if (!state.soulPath) {
-      return 'none — every run uses the built-in default agent';
+  /**
+   * Whether the roster has any agent, read before each menu is drawn: the
+   * Agent row says something different for "none yet" and "none chosen".
+   * A roster that will not load reads as having agents, so setup never
+   * offers to make a first one beside files it could not read.
+   */
+  let rosterHasAgents = false;
+  const refreshRosterHasAgents = async (): Promise<void> => {
+    try {
+      rosterHasAgents = (await loadRosterSouls(env, () => {})).length > 0;
+    } catch {
+      rosterHasAgents = true;
     }
-    return state.soulPath;
+  };
+
+  const agentSummary = (): string => {
+    if (state.soulPath) {
+      return state.soulPath;
+    }
+    return rosterHasAgents
+      ? 'no default — turns that name no agent fail'
+      : 'none yet — Save & finish creates your first agent';
+  };
+
+  const pinForNewSoul = () => {
+    const pinnedModel = state.model ?? defaultModelFor(state.provider);
+    return state.provider !== 'demo'
+      ? { provider: state.provider, ...(pinnedModel !== undefined ? { model: pinnedModel } : {}) }
+      : {};
+  };
+
+  /**
+   * No agent is defined in code, so a setup that would leave none makes the
+   * first one: asked for its name at a terminal (Enter keeps Stratus), and
+   * named Stratus when setup is piped, so a script's answers still line up
+   * with the questions it was written for. It gets the persona and every
+   * tool the old built-in agent had, written into a soul the person can
+   * edit, and becomes the default.
+   *
+   * Runs before anything that needs an agent: the Channels screen (an app
+   * is connected to one), the test run, and the save.
+   */
+  const ensureFirstAgent = async (): Promise<void> => {
+    if (state.soulPath || readNonEmptyString(processEnv.STRATUS_SOUL)) {
+      return;
+    }
+    await refreshRosterHasAgents();
+    if (rosterHasAgents) {
+      return;
+    }
+    const answer = prompter.isInteractive() ? await prompter.ask('Name your first agent (Enter for Stratus): ') : '';
+    const name = answer || 'Stratus';
+    const pin = pinForNewSoul();
+    const claimed = await claimSoulFile(
+      env,
+      { name, instructions: stratusPersona(name) },
+      (agent) => formatSoul({ agent, ...pin }),
+      (message) => writeLine(streams.stdout, message),
+    );
+    state.soulPath = claimed.soulPath;
+    rosterHasAgents = true;
+    writeLine(streams.stdout, `Created ${claimed.agent.name}, your first agent and the default.`);
+    writeLine(streams.stdout, `Their soul lives at ${claimed.soulPath} — edit it any time to change how they talk or what they may use.`);
   };
 
   const chooseAgent = async (): Promise<void> => {
     const answer = await prompter.select('Your default agent:', [
       'Create a new agent',
       'Use an existing soul file',
-      'No default agent',
+      'No default agent (turns must name one)',
     ]);
 
     if (answer.kind !== 'index') {
@@ -286,7 +346,7 @@ export const runSetup = async (
 
     if (answer.index === 2) {
       delete state.soulPath;
-      writeLine(streams.stdout, 'Cleared — runs use the built-in default agent.');
+      writeLine(streams.stdout, 'Cleared — turns that name no agent fail until you pick a default.');
       return;
     }
 
@@ -309,10 +369,7 @@ export const runSetup = async (
     const name = await prompter.ask('Name your agent (Enter to have one generated): ');
     const instructions = await prompter.ask('Describe their personality in a sentence or two (Enter for a starter you can edit later): ');
     const persona = instructions || DEFAULT_SOUL_STARTER;
-    const pinnedModel = state.model ?? defaultModelFor(state.provider);
-    const pin = state.provider !== 'demo'
-      ? { provider: state.provider, ...(pinnedModel !== undefined ? { model: pinnedModel } : {}) }
-      : {};
+    const pin = pinForNewSoul();
     const claimed = await claimSoulFile(
       env,
       { ...(name ? { name } : {}), instructions: persona },
@@ -819,6 +876,7 @@ export const runSetup = async (
       // corrupts every redraw after the first arrow key. Wrapping is not
       // the cosmetic cost I took it for when I let this line grow.
       const approvals = fitMenuRow((await approvalsSummary()).join('; '));
+      await refreshRosterHasAgents();
       // The ChatGPT sign-in is a file of its own, which another setup or a
       // refresh may have changed since the last menu.
       await refreshChatGPTAccount();
@@ -849,15 +907,19 @@ export const runSetup = async (
       } else if (choice.index === 3) {
         await choosePlugins();
       } else if (choice.index === 4) {
+        await ensureFirstAgent();
         await chooseChannels();
       } else if (choice.index === 5) {
         await chooseApprovals();
       } else if (choice.index === 6) {
         await chooseService();
       } else if (choice.index === 7) {
+        await ensureFirstAgent();
         await testRun();
       }
     }
+
+    await ensureFirstAgent();
 
     // Non-zero when the always-on service step failed, matching `stratus
     // service install` and `stratus service uninstall`. Everything setup

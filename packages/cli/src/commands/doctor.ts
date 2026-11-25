@@ -5,7 +5,6 @@ import {
   AGENTS_FOLDER_RECORD,
   planAgentsHome,
   defaultApiKeyEnvName,
-  DEFAULT_STRATUS_AGENT,
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
@@ -852,7 +851,6 @@ export const collectDoctorReport = async (
     problems.push(error instanceof Error ? error.message : String(error));
   }
   const rosterIds = new Set(rosterEntries.map((entry) => entry.soul.agent.id));
-  rosterIds.add(DEFAULT_STRATUS_AGENT.id);
   if (soul) {
     rosterIds.add(soul.agent.id);
   }
@@ -1087,7 +1085,7 @@ export const runDoctor = async (
     // describe a run that cannot happen.
     writeLine(streams.stdout, `  ${'agent'.padEnd(10)}unresolved — the configured soul could not be read`);
   } else {
-    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}${DEFAULT_STRATUS_AGENT.name} (built-in — no soul configured)`);
+    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}none — no default soul is set. \`stratus setup\` creates your first agent`);
   }
 
   writeLine(streams.stdout);

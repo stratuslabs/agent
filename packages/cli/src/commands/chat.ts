@@ -1,14 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import type { Session } from '@stratusagent/core';
-import { DEFAULT_STRATUS_AGENT } from '@stratusagent/state';
 import { defaultPosture, unflaggedApprovals } from '../trusted-config.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { formatEvent } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { defaultApprovalMode, type ParsedChatCommand } from '../parse.ts';
 import { stratusHeaderLines } from '../prompter.ts';
-import { resolveRuntimeConfig, warnOnCredentialOverride, warnOnUntrustedConfig, createAgentRuntime } from '../runtime.ts';
+import { NO_AGENT_TO_RUN, resolveRuntimeConfig, warnOnCredentialOverride, warnOnUntrustedConfig, createAgentRuntime } from '../runtime.ts';
 
 const lastAssistantReply = (session: Session): string => {
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
@@ -45,6 +44,11 @@ export const runChat = async (
     ...(command.configPath ? { configPath: command.configPath } : {}),
   }, env);
   warnOnUntrustedConfig(runtime, streams);
+  if (runtime.soul === undefined) {
+    writeLine(streams.stderr, NO_AGENT_TO_RUN);
+    return 1;
+  }
+  const soul = runtime.soul;
   await warnOnCredentialOverride(runtime, streams, env);
 
   // Interactive means the real terminal: an injected stdinStream is by
@@ -130,7 +134,7 @@ export const runChat = async (
     ...(command.approvals !== undefined
       ? { approvals: command.approvals }
       : unflaggedApprovals(
-        await defaultPosture(env, command.configPath, runtime.soul?.agent.id ?? DEFAULT_STRATUS_AGENT.id),
+        await defaultPosture(env, command.configPath, soul.agent.id),
         defaultApprovalMode(env),
       )),
     askApproval,

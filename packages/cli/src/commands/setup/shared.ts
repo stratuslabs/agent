@@ -8,7 +8,6 @@
 
 import path from 'node:path';
 import {
-  DEFAULT_STRATUS_AGENT,
   loadRosterSouls,
   loadSoulFile,
   readNonEmptyString,
@@ -20,8 +19,8 @@ import { writeLine } from '../../io.ts';
 import type { SetupBase } from './context.ts';
 
 /**
- * A roster entry with an optional path: the built-in Stratus agent
- * comes from no file at all, exactly as the gateway registers it.
+ * A roster entry with an optional path, for an entry setup offers before
+ * its soul file is on disk.
  */
 export interface ChannelRosterEntry extends Omit<RosterEntry, 'path'> {
   path?: string;
@@ -34,25 +33,19 @@ export const createSharedSetup = ({
   prompter,
 }: Pick<SetupBase, 'streams' | 'env' | 'state' | 'prompter'>) => {
   /**
-   * Every agent the gateway would dispatch to: the built-in Stratus
-   * agent, the ~/.stratus/agents roster, and the configured default soul,
-   * which `stratus setup` can point at a file anywhere. The gateway
-   * registers all three, so a Channels list built from the agents
-   * directory alone would hide agents Slack can perfectly well talk to.
-   * Reads state.soulPath rather than the saved config so a soul chosen
-   * earlier in this same setup session is already connectable.
+   * Every agent the gateway would dispatch to: the ~/.stratus/agents
+   * roster and the configured default soul, which `stratus setup` can
+   * point at a file anywhere. The gateway registers both, so a Channels
+   * list built from the agents directory alone would hide agents Slack can
+   * perfectly well talk to. Reads state.soulPath rather than the saved
+   * config so a soul chosen earlier in this same setup session is already
+   * connectable.
    */
   const channelRoster = async (): Promise<{ entries: ChannelRosterEntry[]; loaded: boolean }> => {
     const warnOnce = (message: string): void => writeLine(streams.stderr, `Warning: ${message}.`);
-    // Seeded before the roster loads, exactly as loadRoster does it: a
-    // fresh install with no soul files still has an agent to put on
-    // Slack, and a roster file that declares id "stratus" cannot take the
-    // built-in's place — the gateway skips it, so offering it here would
-    // name an app after an agent that never receives the messages.
-    const entries: ChannelRosterEntry[] = [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } }];
-    // loadRosterSouls refuses a roster whose files collide, and drops the
-    // ones claiming the reserved built-in id, so what comes back here is
-    // already unambiguous.
+    const entries: ChannelRosterEntry[] = [];
+    // loadRosterSouls refuses a roster whose files collide, so what comes
+    // back here is already unambiguous.
     let rosterSouls: RosterEntry[] = [];
     let rosterLoaded = true;
     try {
@@ -66,8 +59,7 @@ export const createSharedSetup = ({
       warnOnce(error instanceof Error ? error.message : String(error));
       // Nothing is offered, not merely the colliding pair. A roster that
       // refuses to load fails `createGateway.start()` outright, so no
-      // agent is servable — not the built-in seeded above, and not the
-      // configured soul resolved below (which can itself BE one of the
+      // agent is servable, not even the configured soul resolved below (which can itself BE one of the
       // colliding files). Listing any of them invites connecting a Slack
       // app to an agent the daemon cannot bring online, and connecting an
       // app is the expensive half of that mistake.
@@ -94,10 +86,9 @@ export const createSharedSetup = ({
     }
     try {
       const soul = await loadSoulFile(resolved);
-      // An explicit id can collide with a roster file, or with the
-      // built-in. The gateway's defaultAgentId replaces the registered
-      // source whenever it is pathless (the built-in) or resolves to a
-      // different file, so the configured soul is the one Slack actually
+      // An explicit id can collide with a roster file. The gateway's
+      // defaultAgentId replaces the registered source whenever it resolves
+      // to a different file, so the configured soul is the one Slack actually
       // dispatches to — offering the namesake here would connect an app
       // to a different agent than it names.
       const collision = entries.findIndex((entry) => entry.soul.agent.id === soul.agent.id);

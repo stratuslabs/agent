@@ -85,10 +85,7 @@ export const runAgents = async (
 
   writeLine(streams.stdout, command.gateway ? `Agents on ${command.gateway}` : 'Agents');
   for (const agent of listings) {
-    const labels = [
-      ...(agent.default ? ['default'] : []),
-      ...(agent.builtIn ? ['built-in'] : []),
-    ];
+    const labels = agent.default ? ['default'] : [];
     writeLine(streams.stdout);
     writeLine(streams.stdout, `  ${agent.name}${labels.length > 0 ? `  (${labels.join(', ')})` : ''}`);
     writeLine(streams.stdout, `    id        ${agent.id}`);
@@ -105,8 +102,8 @@ export const runAgents = async (
     }
   }
   writeLine(streams.stdout);
-  writeLine(streams.stdout, listings.length === 1
-    ? 'That is just the built-in default — create your own with: stratus agent new'
+  writeLine(streams.stdout, listings.length === 0
+    ? 'No agents yet. Create your first with stratus setup, or stratus agent new.'
     : 'Talk to the default with stratus run, or to anyone with stratus run --soul <file>.');
   return 0;
 };

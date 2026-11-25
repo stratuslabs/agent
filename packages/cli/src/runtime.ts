@@ -41,7 +41,6 @@ import {
   createHomeMemoryStore,
   createRuntimeProvider,
   defaultApiKeyEnvName,
-  DEFAULT_STRATUS_AGENT,
   unlistedToolsFor,
   isSignedInRuntime,
   loadCredentials,
@@ -203,6 +202,14 @@ export const warnOnCredentialOverride = async (
 // legacy migration), tools, events, provider (with fallback), and the
 // agent the runtime resolved. run uses it for one shot; chat keeps the
 // runner alive and resumes the same session turn after turn.
+/**
+ * What `run` and `chat` say when no soul resolves. No agent is defined in
+ * code to answer instead, so the command names the ways to get one rather
+ * than talking as a persona nobody made.
+ */
+export const NO_AGENT_TO_RUN = 'No agent to run: no soul is set. Create your first agent with `stratus setup` '
+  + 'or `stratus agent new`, or pass --soul <path>.';
+
 export const createAgentRuntime = async (
   streams: CliStreams,
   options: {
@@ -223,6 +230,10 @@ export const createAgentRuntime = async (
     configPath?: string;
   },
 ) => {
+  const soul = options.runtime.soul;
+  if (soul === undefined) {
+    throw new Error(NO_AGENT_TO_RUN);
+  }
   const runEnv = options.env ?? {};
   await migrateLegacyMemory(runEnv);
   // Routed, as the daemon's is: the memory tools register before the
@@ -413,13 +424,13 @@ export const createAgentRuntime = async (
         options.approvalsDefaulted ?? false,
         approvalMode === 'open'
           ? {
-              gateExternalContent: await externalContentGated(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id),
+              gateExternalContent: await externalContentGated(runEnv, options.configPath, soul.agent.id),
               ...(options.approvalsPosture === 'review'
                 ? {
-                    review: await reviewSettingsIn(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id) ?? {},
+                    review: await reviewSettingsIn(runEnv, options.configPath, soul.agent.id) ?? {},
                     // Read per call, like the daemon's: a store that can't
                     // be read rejects, and the call asks.
-                    secretsFor: () => credentialValuesFor(createFileCredentialResolver(runEnv), options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT),
+                    secretsFor: () => credentialValuesFor(createFileCredentialResolver(runEnv), soul.agent),
                   }
                 : {}),
             }
@@ -436,9 +447,8 @@ export const createAgentRuntime = async (
     hostedRunner = runner;
     await runner.initialize();
 
-    // A soul is a full identity — without one, every provider serves the
-    // same built-in Stratus persona.
-    const agent: AgentDefinition = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
+    // A soul is a full identity: persona, tools, memory id.
+    const agent: AgentDefinition = soul.agent;
 
     // The same advisory the daemon gives at roster load, from the same
     // kernel check: a soul enabling a skill whose `requires:` its `tools:`

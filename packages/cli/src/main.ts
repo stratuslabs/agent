@@ -6,7 +6,6 @@ import {
   describeStateBackup,
   type StateBackup,
   STATE_SCHEMA_VERSION,
-  DEFAULT_STRATUS_AGENT,
   redactProviderReplayState,
 } from '@stratusagent/state';
 import { defaultPosture, unflaggedApprovals } from './trusted-config.ts';
@@ -43,6 +42,7 @@ import { writeLine, readPromptFromStdin } from './io.ts';
 import { CLI_VERSION } from './npm.ts';
 import { parseCommand, defaultApprovalMode, memoryCommandWritesState } from './parse.ts';
 import {
+  NO_AGENT_TO_RUN,
   resolveRuntimeConfig,
   warnOnCredentialOverride,
   warnOnUntrustedConfig,
@@ -296,6 +296,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
 
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
     warnOnUntrustedConfig(runtime, streams);
+    if (runtime.soul === undefined) {
+      writeLine(streams.stderr, NO_AGENT_TO_RUN);
+      return 1;
+    }
     await warnOnCredentialOverride(runtime, streams, resolvedEnv);
 
     if (command.format === 'text') {
@@ -313,7 +317,7 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
       ...(command.approvals !== undefined
         ? { approvals: command.approvals }
         : unflaggedApprovals(
-          await defaultPosture(resolvedEnv, command.configPath, runtime.soul?.agent.id ?? DEFAULT_STRATUS_AGENT.id),
+          await defaultPosture(resolvedEnv, command.configPath, runtime.soul.agent.id),
           defaultApprovalMode(resolvedEnv, argv.includes('--stdin')),
         )),
       ...(command.maxTurns !== undefined ? { maxTurns: command.maxTurns } : {}),
