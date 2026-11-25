@@ -1,5 +1,5 @@
 import { gatewayInfoPath } from '@stratusagent/state';
-import { callRunningGateway, gatewayErrorMessage, runningGatewayBase, unpublishedDaemon, withoutApiMessage } from '../daemon.ts';
+import { callRunningGateway, gatewayErrorMessage, runningGatewayBase, unpublishedDaemon, UPDATING_MESSAGE, withoutApiMessage } from '../daemon.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine } from '../io.ts';
 import type { ParsedHealthCommand } from '../parse.ts';
@@ -83,6 +83,9 @@ export const runHealth = async (
     const daemon = unpublishedDaemon(env);
     if (daemon.state === 'without-api') {
       return fail(withoutApiMessage(daemon.packageMissing));
+    }
+    if (daemon.state === 'updating') {
+      return fail(UPDATING_MESSAGE);
     }
     if (daemon.state === 'none') {
       return fail(

@@ -228,6 +228,8 @@ export type DoctorDaemon =
    * runs with the API off.
    */
   | { state: 'without-api'; packageMissing: boolean }
+  /** `stratus update` holds the home to migrate it; the daemon is stopped until it finishes. */
+  | { state: 'updating' }
   | { state: 'unreachable'; url: string }
   | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string; exposedOn?: string };
 
@@ -319,7 +321,9 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
       const unpublished = unpublishedDaemon(env);
       return unpublished.state === 'without-api'
         ? { state: 'without-api', packageMissing: unpublished.packageMissing }
-        : unpublished.state === 'unknown' ? { state: 'no-api', lockUnreadable: true } : { state: 'no-api' };
+        : unpublished.state === 'updating'
+          ? { state: 'updating' }
+          : unpublished.state === 'unknown' ? { state: 'no-api', lockUnreadable: true } : { state: 'no-api' };
     }
     problems.push(`${infoPath} cannot be read (${(error as Error).message}), so doctor cannot find the running daemon. Check its permissions, or remove it and \`stratus restart\`.`);
     return { state: 'no-api' };
@@ -1186,6 +1190,8 @@ export const runDoctor = async (
     } else {
       writeLine(streams.stdout, `  ${''.padEnd(10)}It is still starting or restarting, or runs with --no-api or api.enabled: false.`);
     }
+  } else if (daemon.state === 'updating') {
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}stopped while \`stratus update\` migrates this home`);
   } else if (daemon.state === 'unreachable') {
     writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}did not answer at ${daemon.url}`);
   } else {

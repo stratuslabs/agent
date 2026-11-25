@@ -90,7 +90,10 @@ since a restart is what applies the daemon-level settings in it. No daemon runni
 needs none. A daemon with no control API publishes no address, so doctor
 also checks the home lock (`~/.stratus/stratusd.lock`), which a daemon holds
 from start to exit: it says `running without a control API` when the lock is
-held, and `none running` when it is not. Without the API, the commands that
+held, and `none running` when it is not. `stratus update` holds the same
+lock while it migrates the home, with the daemon stopped; it also holds
+`~/.stratus/update.lock` then, and doctor says
+``stopped while `stratus update` migrates this home``. Without the API, the commands that
 ask the daemon (`health`, `sessions`, `tasks`, `restart`, `dashboard`) can't
 reach it. The usual cause is a plain `npm install -g @stratusagent/cli`,
 which doesn't install the optional `@stratusagent/control-api`; doctor then

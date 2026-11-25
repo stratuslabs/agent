@@ -3,6 +3,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  claimFileLock,
+  type FileLock,
   newerStateMessage,
   pendingStateMigrations,
   planAgentsHome,
@@ -14,6 +16,7 @@ import {
   type StateBackup,
   STATE_SCHEMA_VERSION,
   type AppliedStateMigration,
+  updateLockPath,
 } from '@stratusagent/state';
 import {
   installService,
@@ -74,16 +77,29 @@ import { readPluginUpdates } from '../plugin-updates.ts';
  * probe for a daemon old enough to predate the claim. Failing either, the
  * marked migrations stay pending and the operator is told what to stop —
  * a deferral is recoverable, and moving live state is not.
+ *
+ * The update lock is taken first and let go last, so whenever this command
+ * has the home, doctor and health can see the holder is an update and not
+ * a daemon. It only informs them: one that cannot be taken costs their
+ * wording, never the migration.
  */
 const claimExclusiveHome = async (
   env: CliEnvironment,
   gateway: typeof import('@stratusagent/gateway'),
 ): Promise<{ held: boolean; reason: string; release: () => void }> => {
   const { claimHome, HomeClaimedError } = gateway;
+  let marker: FileLock | undefined;
+  try {
+    // A reader's probe holds it for microseconds; a second update, longer.
+    marker = claimFileLock(updateLockPath(env), { waitMs: UPDATE_LOCK_WAIT_MS });
+  } catch {
+    marker = undefined;
+  }
   let claim: { release: () => void };
   try {
     claim = claimHome(env);
   } catch (error) {
+    marker?.release();
     if (error instanceof HomeClaimedError) {
       return { held: false, reason: 'its lock is held', release: () => {} };
     }
@@ -91,10 +107,21 @@ const claimExclusiveHome = async (
   }
   if (await legacyDaemonServing(env)) {
     claim.release();
+    marker?.release();
     return { held: false, reason: 'a daemon predating the lock is still answering', release: () => {} };
   }
-  return { held: true, reason: '', release: () => claim.release() };
+  return {
+    held: true,
+    reason: '',
+    release: () => {
+      claim.release();
+      marker?.release();
+    },
+  };
 };
+
+/** How long `stratus update` waits for its own lock before going on without it. */
+const UPDATE_LOCK_WAIT_MS = 1_000;
 
 /**
  * Set on the process `stratus update` hands its second half to, saying

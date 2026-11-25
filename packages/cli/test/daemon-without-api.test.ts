@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { claimHome } from '@stratusagent/gateway';
+import { claimFileLock, updateLockPath } from '@stratusagent/state';
 import { runCli } from '../src/index.ts';
 
 // A daemon from a plain `npm i -g @stratusagent/cli` has no
@@ -153,4 +154,46 @@ test('commands that ask the daemon say it runs without a control API instead of 
   // Released: the old sentence, as before.
   const after = await run(['restart'], env);
   assert.match(after.output.stderr, /^Error: no running daemon found/);
+});
+
+test('while `stratus update` holds the home to migrate it, readers say so instead of naming a daemon', async () => {
+  // The update holds the same home lock a daemon does, with no daemon
+  // running. Its own lock beside it is what tells the two apart.
+  const home = await newHome();
+  const env = envFor(home, false);
+  const update = claimFileLock(updateLockPath(env));
+  const claim = claimHome(env);
+  try {
+    const health = await run(['health'], env);
+    assert.equal(health.exitCode, 1);
+    assert.match(health.output.stderr, /^Error: `stratus update` is migrating this home/);
+    assert.doesNotMatch(health.output.stderr, /stratusd is running|isn't installed|npm install/);
+
+    const doctor = await run(['doctor'], env);
+    assert.match(doctor.output.stdout, /daemon {4}stopped while `stratus update` migrates this home\n/);
+    assert.doesNotMatch(doctor.output.stdout, /isn't installed|npm install -g @stratusagent\/control-api/);
+    const json = await run(['doctor', '--format', 'json'], env);
+    assert.deepEqual((JSON.parse(json.output.stdout) as { daemon: unknown }).daemon, { state: 'updating' });
+
+    const restart = await run(['restart'], env);
+    assert.equal(restart.exitCode, 1);
+    assert.match(restart.output.stderr, /^Error: `stratus update` is migrating this home/);
+  } finally {
+    claim.release();
+    update.release();
+  }
+});
+
+test('the update lock alone, with the home free, is not a daemon', async () => {
+  // Taken before the home and let go after it, so this is the instant
+  // around the update's claim: nothing holds the home, nothing is running.
+  const home = await newHome();
+  const env = envFor(home, false);
+  const update = claimFileLock(updateLockPath(env));
+  try {
+    const health = await run(['health'], env);
+    assert.match(health.output.stderr, /^Error: stratusd is not running for this home/);
+  } finally {
+    update.release();
+  }
 });

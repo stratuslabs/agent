@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import {
   fileLockHeld,
   homeLockPath,
+  updateLockPath,
   readNonEmptyString,
   readProcessEnv,
   readWorkingDirectory,
@@ -154,11 +155,14 @@ const CONTROL_API_PACKAGE = '@stratusagent/control-api';
  * optional. That daemon still holds the home lock for its whole life, so
  * the lock, not the file, says whether one is running. `unknown` when this
  * process cannot read the lock, as in a sandboxed shell: no holder seen is
- * not no holder.
+ * not no holder. `updating` when the holder is `stratus update` migrating
+ * the home, with the daemon stopped until it finishes: it holds the same
+ * lock, and its own beside it.
  */
 export type UnpublishedDaemon =
   | { state: 'none' }
   | { state: 'without-api'; packageMissing: boolean }
+  | { state: 'updating' }
   | { state: 'unknown' };
 
 export const unpublishedDaemon = (env: CliEnvironment): UnpublishedDaemon => {
@@ -166,8 +170,18 @@ export const unpublishedDaemon = (env: CliEnvironment): UnpublishedDaemon => {
   if (held === undefined) {
     return { state: 'unknown' };
   }
-  return held ? { state: 'without-api', packageMissing: !packageInstalled(CONTROL_API_PACKAGE, env) } : { state: 'none' };
+  if (!held) {
+    return { state: 'none' };
+  }
+  if (fileLockHeld(updateLockPath(env)) === true) {
+    return { state: 'updating' };
+  }
+  return { state: 'without-api', packageMissing: !packageInstalled(CONTROL_API_PACKAGE, env) };
 };
+
+/** What to say while `stratus update` has the home. */
+export const UPDATING_MESSAGE = '`stratus update` is migrating this home, and stratusd is stopped until it finishes. '
+  + 'Try again once the update is done.';
 
 /** Why a daemon holding the home cannot be asked anything, and what to do. */
 export const withoutApiMessage = (packageMissing: boolean): string =>
@@ -186,7 +200,9 @@ export const withoutApiMessage = (packageMissing: boolean): string =>
  */
 export const unreachableDaemonMessage = (env: CliEnvironment, none: string): string => {
   const daemon = unpublishedDaemon(env);
-  return daemon.state === 'without-api' ? withoutApiMessage(daemon.packageMissing) : none;
+  return daemon.state === 'without-api'
+    ? withoutApiMessage(daemon.packageMissing)
+    : daemon.state === 'updating' ? UPDATING_MESSAGE : none;
 };
 
 export const noRunningDaemonMessage = (env: CliEnvironment): string =>

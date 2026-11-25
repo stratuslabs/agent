@@ -133,6 +133,7 @@ export {
   gatewayInfoPath,
   grantsLockPath,
   homeLockPath,
+  updateLockPath,
 } from './paths.ts';
 
 export {
