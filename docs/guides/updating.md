@@ -505,9 +505,9 @@ finishes the migrations.
 ## The companion packages go up with it
 
 The CLI is one global install and its optional companions are others — the
-[Slack channel](./slack.md), the [control API and
-dashboard](./remote-access.md), and each [tool plugin](./tools.md). They
-ship from one repository in lockstep with the CLI, so `stratus update`
+[Slack channel](./slack.md), the [control API](./remote-access.md), and
+each [tool plugin](./tools.md). They ship from one repository in lockstep
+with the CLI, so `stratus update`
 upgrades every one this machine has, to the version the CLI is going to,
 in the same `npm install` call. Nothing else does: upgrading the CLI alone
 used to leave each of them at whatever version was installed the day
@@ -585,6 +585,12 @@ held and the installed copy stays. `stratus update --check` lists both:
               @stratusagent/plugin-spawn 0.1.0 → 0.2.0
               @acme/plugin-x 1.0.0, held: its latest release (2.0.0) is plugin version 2, and this CLI loads version 1
 ```
+
+The web dashboard, `@stratusagent/dashboard`, is listed here too, not with
+the companions above. It isn't a plugin, so no `plugins` block names it and
+there is no manifest to check, but it releases from `stratuslabs/plugins`
+like one. Up to 0.14.x it shipped with the CLI at the CLI's version; now
+`stratus update` moves it to its latest release wherever it is installed.
 
 Only a plugin that is behind counts as something to do. One that is held,
 or that npm didn't answer about, is named but doesn't make `--check` exit 1,

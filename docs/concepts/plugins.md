@@ -74,9 +74,10 @@ key selects the other two. See [Extending](../guides/extending.md).
 - [`@stratusagent/control-api`](../../packages/control-api) — the
   authenticated HTTP + WebSocket API over a running daemon.
   See [Remote access](../guides/remote-access.md).
-- [`@stratusagent/dashboard`](../../packages/dashboard) — the web UI on top
+- [`@stratusagent/dashboard`](https://github.com/stratuslabs/plugins/tree/main/dashboard) — the web UI on top
   of that API. No build step: what ships in `ui/` is hand-written HTML,
-  CSS, and ES modules.
+  CSS, and ES modules. It releases from `stratuslabs/plugins` on its own
+  versions, not with the CLI.
 - [`@stratusagent/tool-fs`](../../packages/tool-fs),
   [`tool-shell`](../../packages/tool-shell),
   [`tool-web`](../../packages/tool-web),

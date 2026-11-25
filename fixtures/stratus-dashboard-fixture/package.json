@@ -1,0 +1,8 @@
+{
+  "name": "stratus-dashboard-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stands in for @stratusagent/dashboard, which releases from stratuslabs/plugins, so the control API's optional page can be tested through its real loader.",
+  "type": "module",
+  "exports": "./index.js"
+}

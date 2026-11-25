@@ -19,12 +19,20 @@ const DASHBOARD_PACKAGE = '@stratusagent/dashboard';
 const DASHBOARD_PACKAGES = [CONTROL_API_PACKAGE, DASHBOARD_PACKAGE];
 
 /**
+ * What npm is asked for. The control API at this CLI's own version, as the
+ * provider packages are: it ships in lockstep, and an unpinned install
+ * would put the latest control API beside an older daemon. The page at its
+ * latest release: it ships from `stratuslabs/plugins` on its own versions,
+ * so there is no release at this CLI's version to ask for.
+ */
+const installSpecifierFor = (name: string): string =>
+  `${name}@${name === DASHBOARD_PACKAGE ? 'latest' : CLI_VERSION}`;
+
+/**
  * Offers the dashboard's missing packages. This command is the one place
  * they are offered: setup and the rest leave them alone, since
  * the control API binds a port and the person to ask is the one who just
- * asked for the dashboard. At this CLI's own version, as the provider
- * packages are: they ship in lockstep, and an unpinned install would put
- * the latest control API beside an older daemon.
+ * asked for the dashboard. Versions as `installSpecifierFor` picks them.
  *
  * `ready` means this process can load them now and should carry on;
  * `elsewhere` that npm installed them where this CLI does not look (it
@@ -37,7 +45,7 @@ const offerDashboardPackages = async (
   env: CliEnvironment,
 ): Promise<'ready' | 'elsewhere' | 'missing'> => {
   const one = missing.length === 1;
-  const specifiers = missing.map((name) => `${name}@${CLI_VERSION}`);
+  const specifiers = missing.map(installSpecifierFor);
   const install = `npm install -g ${specifiers.join(' ')}`;
   writeLine(streams.stdout, `\`stratus dashboard\` needs ${missing.join(' and ')}, which ${one ? 'is' : 'are'} not installed.`);
   if (missing.includes(CONTROL_API_PACKAGE)) {
@@ -182,7 +190,7 @@ export const runDashboard = async (
         streams.stderr,
         `Error: this stratus can load ${DASHBOARD_PACKAGE} and the daemon cannot. If it started before the package was installed, `
           + '`stratus restart` loads it. If it runs from another installation, install '
-          + `${DASHBOARD_PACKAGE}@${CLI_VERSION} into that one (\`npm install -g ${DASHBOARD_PACKAGE}@${CLI_VERSION}\` for a global install), then \`stratus restart\`.`,
+          + `${DASHBOARD_PACKAGE} into that one (\`npm install -g ${installSpecifierFor(DASHBOARD_PACKAGE)}\` for a global install), then \`stratus restart\`.`,
       );
       return 1;
     }

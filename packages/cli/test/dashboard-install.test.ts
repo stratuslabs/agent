@@ -54,7 +54,7 @@ const machine = (missing: string[], install: { ok: boolean; message: string; res
 
 const gatewayFile = (home: string) => path.join(home, '.stratus', 'gateway.json');
 
-test('stratus dashboard offers the missing packages, installs them at its own version, and opens', async () => {
+test('stratus dashboard offers the missing packages, installs the API at its own version and the page at its latest, and opens', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-dash-install-'));
   const box = machine(DASHBOARD);
   const { streams, output } = createStreams();
@@ -78,9 +78,10 @@ test('stratus dashboard offers the missing packages, installs them at its own ve
 
   assert.equal(exitCode, 0, output.stderr);
   assert.match(output.stdout, /needs @stratusagent\/control-api and @stratusagent\/dashboard/);
-  // Lockstep with this CLI, like the provider packages: an unpinned install
-  // would put the latest control API beside an older daemon.
-  assert.deepEqual(box.installed, [[`${API}@${CLI_VERSION}`, `${PAGE}@${CLI_VERSION}`]]);
+  // The API in lockstep with this CLI, like the provider packages: an
+  // unpinned install would put the latest control API beside an older
+  // daemon. The page releases from stratuslabs/plugins on its own versions.
+  assert.deepEqual(box.installed, [[`${API}@${CLI_VERSION}`, `${PAGE}@latest`]]);
   assert.match(output.stdout, /Installed @stratusagent\/control-api and @stratusagent\/dashboard\./);
   assert.match(output.stdout, /ready at http:\/\/127\.0\.0\.1:\d+/);
   assert.match(openedUrl, /\/api\/v1\/auth\/session\?ott=/);
@@ -107,7 +108,7 @@ test('stratus dashboard installs only the half that is missing', async () => {
 
   assert.equal(exitCode, 0, output.stderr);
   assert.match(output.stdout, /needs @stratusagent\/dashboard,/);
-  assert.deepEqual(box.installed, [[`${PAGE}@${CLI_VERSION}`]]);
+  assert.deepEqual(box.installed, [[`${PAGE}@latest`]]);
 });
 
 test('without a terminal, stratus dashboard prints the install command and starts nothing', async () => {
@@ -134,7 +135,7 @@ test('without a terminal, stratus dashboard prints the install command and start
   assert.equal(exitCode, 1);
   assert.deepEqual(box.installed, []);
   assert.ok(
-    output.stderr.includes(`npm install -g ${API}@${CLI_VERSION} ${PAGE}@${CLI_VERSION}`),
+    output.stderr.includes(`npm install -g ${API}@${CLI_VERSION} ${PAGE}@latest`),
     output.stderr,
   );
   // Refused before a daemon was started, not after waiting for one that
@@ -165,7 +166,7 @@ test('declining the install leaves the machine alone and says how to do it later
 
   assert.equal(exitCode, 1);
   assert.deepEqual(box.installed, []);
-  assert.ok(output.stdout.includes(`npm install -g ${API}@${CLI_VERSION} ${PAGE}@${CLI_VERSION}`), output.stdout);
+  assert.ok(output.stdout.includes(`npm install -g ${API}@${CLI_VERSION} ${PAGE}@latest`), output.stdout);
   assert.doesNotMatch(output.stdout, /No daemon is running/);
 });
 
@@ -190,7 +191,7 @@ test('a failed install is reported with the command, and no daemon is started', 
 
   assert.equal(exitCode, 1);
   assert.match(output.stderr, /Could not install: npm exited with code 243/);
-  assert.ok(output.stderr.includes(`npm install -g ${API}@${CLI_VERSION} ${PAGE}@${CLI_VERSION}`), output.stderr);
+  assert.ok(output.stderr.includes(`npm install -g ${API}@${CLI_VERSION} ${PAGE}@latest`), output.stderr);
   assert.doesNotMatch(output.stdout, /No daemon is running/);
 });
 
@@ -245,7 +246,7 @@ test('after the install, a daemon already holding the home is told to restart, n
     });
 
     assert.equal(exitCode, 1);
-    assert.deepEqual(box.installed, [[`${API}@${CLI_VERSION}`, `${PAGE}@${CLI_VERSION}`]]);
+    assert.deepEqual(box.installed, [[`${API}@${CLI_VERSION}`, `${PAGE}@latest`]]);
     assert.match(output.stderr, /started before the dashboard packages were installed/);
     assert.match(output.stderr, /stratus service stop/);
     // Not the 15-second wait for an address this daemon can never publish.
@@ -353,7 +354,7 @@ test('a running daemon with the control API but no dashboard is offered the page
 
   assert.equal(exitCode, 0, output.stderr);
   assert.ok(output.stdout.includes(`The daemon at ${daemon.base} serves the control API without the dashboard.`), output.stdout);
-  assert.deepEqual(box.installed, [[`${PAGE}@${CLI_VERSION}`]]);
+  assert.deepEqual(box.installed, [[`${PAGE}@latest`]]);
   assert.match(output.stdout + output.stderr, /`stratus restart`, then `stratus dashboard` again/);
   // No session minted for a page that would only 404.
   assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
@@ -374,7 +375,7 @@ test('without a terminal, a running daemon with no dashboard gets the install co
 
   assert.equal(exitCode, 1);
   assert.deepEqual(box.installed, []);
-  assert.ok(output.stderr.includes(`npm install -g ${PAGE}@${CLI_VERSION}`), output.stderr);
+  assert.ok(output.stderr.includes(`npm install -g ${PAGE}@latest`), output.stderr);
   assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
 });
 
@@ -396,6 +397,6 @@ test('a running daemon started before the dashboard was installed is told to res
   assert.match(output.stderr, /this stratus can load @stratusagent\/dashboard and the daemon cannot/);
   assert.match(output.stderr, /started before the package was installed, `stratus restart` loads it/);
   // A daemon from another installation: a restart alone would not give it the package.
-  assert.ok(output.stderr.includes(`npm install -g ${PAGE}@${CLI_VERSION}`), output.stderr);
+  assert.ok(output.stderr.includes(`npm install -g ${PAGE}@latest`), output.stderr);
   assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
 });

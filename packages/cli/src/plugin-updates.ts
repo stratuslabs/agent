@@ -1,11 +1,12 @@
 import { isPackageName } from '@stratusagent/plugins';
 import type { CliEnvironment } from './environment.ts';
-import { CLI_PACKAGE_NAME, compareVersions, defaultInstalledVersionReader } from './npm.ts';
+import { CLI_PACKAGE_NAME, compareVersions, defaultInstalledVersionReader, isInstallableSpecifier } from './npm.ts';
 import {
   FIRST_PARTY_CAPABILITY_PACKAGES,
   FIRST_PARTY_COMPANION_PACKAGES,
+  FIRST_PARTY_SEPARATE_PACKAGES,
 } from './plugin-catalog.ts';
-import { checkPluginReleases, currentPlatformHost, loadableRelease } from './plugin-index.ts';
+import { checkPluginReleases, currentPlatformHost, installSpecifier, loadableRelease, type PluginRelease } from './plugin-index.ts';
 import { loadServePlugins } from './trusted-config.ts';
 
 /** One configured plugin that releases apart from the CLI, and what `stratus update` can do about it. */
@@ -28,6 +29,23 @@ const RELEASED_WITH_THE_CLI: ReadonlySet<string> = new Set([
   ...FIRST_PARTY_CAPABILITY_PACKAGES,
 ]);
 
+const NOT_PLUGINS: ReadonlySet<string> = new Set(FIRST_PARTY_SEPARATE_PACKAGES);
+
+/**
+ * Whether a release of a package that is not a plugin can be installed
+ * here. There is no manifest to judge, so only the installer's own fence
+ * applies: a release it then refuses is a dead end.
+ */
+const installableRelease = (
+  name: string,
+  release: Extract<PluginRelease, { status: 'published' }>,
+): { ok: true; version: string } | { ok: false; reason: string } => {
+  const specifier = installSpecifier(name, release.version);
+  return isInstallableSpecifier(specifier)
+    ? { ok: true, version: release.version }
+    : { ok: false, reason: `this CLI can't pass its latest release (${release.version}) to npm; run npm install -g ${specifier} yourself` };
+};
+
 /**
  * The plugins this machine runs that release on their own (everything from
  * `stratuslabs/plugins`, and anyone else's), and whether each lags its
@@ -35,7 +53,9 @@ const RELEASED_WITH_THE_CLI: ReadonlySet<string> = new Set([
  *
  * The inventory is the trusted config's `plugins` block, read the way the
  * daemon reads it, narrowed to packages that are installed here: that is
- * what the daemon loads. Not the curated index, so a plugin installed by
+ * what the daemon loads. Plus the first-party packages that are not
+ * plugins (`FIRST_PARTY_SEPARATE_PACKAGES`) wherever they are installed,
+ * since no config names them. Not the curated index, so a plugin installed by
  * hand, or later dropped from the index, is still kept current, and a
  * package that moves out of the monorepo keeps upgrading where it is
  * configured. A plugin installed but never configured is not loaded, and
@@ -59,7 +79,7 @@ export const readPluginUpdates = async (
     .filter((name) => isPackageName(name) && !RELEASED_WITH_THE_CLI.has(name));
   const read = env.installedVersionReader ?? defaultInstalledVersionReader;
   const installed: Array<{ name: string; version: string }> = [];
-  for (const name of configured) {
+  for (const name of new Set([...configured, ...FIRST_PARTY_SEPARATE_PACKAGES])) {
     const version = await read(name).catch(() => undefined);
     if (version !== undefined) {
       installed.push({ name, version });
@@ -78,7 +98,7 @@ export const readPluginUpdates = async (
     if (compareVersions(release.version, version) <= 0) {
       return { name, installed: version, state: 'current' };
     }
-    const loadable = loadableRelease(name, release, host);
+    const loadable = NOT_PLUGINS.has(name) ? installableRelease(name, release) : loadableRelease(name, release, host);
     return loadable.ok
       ? { name, installed: version, state: 'behind', version: loadable.version }
       : { name, installed: version, state: 'held', version: release.version, reason: loadable.reason };

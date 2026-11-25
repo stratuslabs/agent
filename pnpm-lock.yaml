@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@stratusagent/dashboard':
+        specifier: workspace:stratus-dashboard-fixture@*
+        version: link:fixtures/stratus-dashboard-fixture
       stratus-plugin-aliased:
         specifier: workspace:stratus-plugin-fixture@*
         version: link:fixtures/stratus-plugin-fixture
@@ -29,6 +32,8 @@ importers:
       stratus-plugin-fixture-provider:
         specifier: workspace:*
         version: link:fixtures/stratus-plugin-fixture-provider
+
+  fixtures/stratus-dashboard-fixture: {}
 
   fixtures/stratus-plugin-fixture: {}
 
@@ -113,9 +118,6 @@ importers:
       '@stratusagent/control-api':
         specifier: workspace:*
         version: link:../control-api
-      '@stratusagent/dashboard':
-        specifier: workspace:*
-        version: link:../dashboard
       '@stratusagent/plugin-mcp':
         specifier: workspace:*
         version: link:../plugin-mcp
@@ -171,9 +173,6 @@ importers:
         specifier: ^8.18.0
         version: 8.23.0
     devDependencies:
-      '@stratusagent/dashboard':
-        specifier: workspace:*
-        version: link:../dashboard
       '@types/node':
         specifier: ^24.6.0
         version: 24.19.2
@@ -185,15 +184,6 @@ importers:
         version: 5.9.3
 
   packages/core:
-    devDependencies:
-      '@types/node':
-        specifier: ^24.6.0
-        version: 24.19.2
-      typescript:
-        specifier: ^5.9.3
-        version: 5.9.3
-
-  packages/dashboard:
     devDependencies:
       '@types/node':
         specifier: ^24.6.0

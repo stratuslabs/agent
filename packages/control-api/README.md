@@ -13,9 +13,14 @@ npm install -g @stratusagent/control-api
 stratus serve                       # binds http://127.0.0.1:4123
 ```
 
-The **web UI is a separate package** (`@stratusagent/dashboard`). This one
-serves `/api/v1` and nothing else, because its other two consumers — the
-macOS app and a headless VM — want the API and not a web page.
+The **web UI is a separate package** (`@stratusagent/dashboard`, which
+releases from [`stratuslabs/plugins`](https://github.com/stratuslabs/plugins/tree/main/dashboard)).
+This one serves `/api/v1` and nothing else, because its other two
+consumers — the macOS app and a headless VM — want the API and not a web
+page. When the dashboard is installed where this package resolves it, the
+API loads it by name and serves it at `/`: the contract is a
+`createDashboardAssets()` export returning `{ serve(pathname, response) }`,
+which answers `true` when it wrote a response.
 
 ## Authentication
 
