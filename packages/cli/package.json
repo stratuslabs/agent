@@ -73,13 +73,17 @@
   },
   "peerDependencies": {
     "@stratusagent/channel-slack": "workspace:*",
-    "@stratusagent/control-api": "workspace:*"
+    "@stratusagent/control-api": "workspace:*",
+    "@stratusagent/dashboard": "*"
   },
   "peerDependenciesMeta": {
     "@stratusagent/channel-slack": {
       "optional": true
     },
     "@stratusagent/control-api": {
+      "optional": true
+    },
+    "@stratusagent/dashboard": {
       "optional": true
     }
   }

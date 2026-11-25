@@ -24,8 +24,10 @@ nobody can resolve in its published metadata.
 
 Three root links are aliases rather than packages: `@stratusagent/dashboard`
 (of `stratus-dashboard-fixture`), because the control API resolves that name
-and the package it names no longer lives here; `stratus-plugin-aliased`
-(of `stratus-plugin-fixture`), for a config key that differs from its
-manifest's `packageName`; and `stratus-plugin-fixture-channel-twin` (of
-`stratus-plugin-fixture-channel`), for two enabled plugins contributing the
-same channel kind.
+and the package it names no longer lives here (the CLI and the control API
+declare it as an optional peer, and pnpm installs a package's own peers, so
+`pnpm-workspace.yaml` overrides the name to this fixture for them too);
+`stratus-plugin-aliased` (of `stratus-plugin-fixture`), for a config key that
+differs from its manifest's `packageName`; and
+`stratus-plugin-fixture-channel-twin` (of `stratus-plugin-fixture-channel`),
+for two enabled plugins contributing the same channel kind.

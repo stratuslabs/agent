@@ -400,3 +400,21 @@ test('a running daemon started before the dashboard was installed is told to res
   assert.ok(output.stderr.includes(`npm install -g ${PAGE}@latest`), output.stderr);
   assert.ok(!daemon.asked.some((url) => url.endsWith('/api/v1/auth/ott')), daemon.asked.join(', '));
 });
+
+test('the CLI and the control API keep the dashboard as an optional peer on any version', async () => {
+  // Both resolve the page from their own location: the CLI to offer it, the
+  // control API to serve it. Without a declared edge, an install that only
+  // links what a package declares (pnpm's isolated layout, Yarn PnP) leaves the
+  // page installed but unresolvable. It releases from stratuslabs/plugins on
+  // its own versions, so the range can't be this repository's lockstep version.
+  for (const pkg of ['cli', 'control-api']) {
+    const manifest = JSON.parse(await readFile(new URL(`../../${pkg}/package.json`, import.meta.url), 'utf8')) as {
+      dependencies?: Record<string, string>;
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+    };
+    assert.equal(manifest.dependencies?.[PAGE], undefined, `${pkg} must not depend on ${PAGE}`);
+    assert.equal(manifest.peerDependencies?.[PAGE], '*', `${pkg} must declare ${PAGE} as a peer on any version`);
+    assert.equal(manifest.peerDependenciesMeta?.[PAGE]?.optional, true, `${pkg} must keep ${PAGE} an optional peer`);
+  }
+});

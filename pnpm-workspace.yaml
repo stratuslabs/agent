@@ -3,3 +3,9 @@ packages:
   # Plugin manifests that exist only so tests have something to resolve.
   # Outside `packages/` because everything there ships; these are private.
   - fixtures/*
+
+overrides:
+  # The CLI and the control API declare the real dashboard as an optional
+  # peer, and pnpm installs a package's own peers. It releases from
+  # stratuslabs/plugins, so here that name always means the fixture.
+  '@stratusagent/dashboard': 'link:./fixtures/stratus-dashboard-fixture'
