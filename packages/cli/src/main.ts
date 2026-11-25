@@ -37,7 +37,7 @@ import { runTasks } from './commands/tasks.ts';
 import { runTemplateAdd } from './commands/template.ts';
 import { runUpdate } from './commands/update.ts';
 import type { CliStreams, CliEnvironment } from './environment.ts';
-import { HELP_TEXT } from './help.ts';
+import { HELP_TEXT, commandHelp, helpTopic, usagePointer } from './help.ts';
 import { jsonRecordStreams, wantsJsonLog } from './logs.ts';
 import { writeLine, readPromptFromStdin } from './io.ts';
 import { CLI_VERSION } from './npm.ts';
@@ -80,7 +80,10 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
     parsingArguments = false;
 
     if (command.command === 'help') {
-      writeLine(streams.stdout, HELP_TEXT);
+      // `stratus doctor --help` and `stratus help doctor` both mean the
+      // doctor's part; `stratus --help` and a bare `stratus`, all of it.
+      const topic = helpTopic(argv[0] === 'help' ? argv.slice(1) : argv);
+      writeLine(streams.stdout, topic === undefined ? HELP_TEXT : commandHelp(topic));
       return 0;
     }
 
@@ -336,12 +339,12 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeLine(streams.stderr, `Error: ${message}`);
-    // The help is for a person at a terminal who mistyped; under a log
-    // shipper it would be a hundred records burying the one that says what
-    // failed.
+    // One line pointing at the help, not the help itself: four hundred
+    // lines under the error scroll the error off the screen, and the
+    // person who mistyped `doctor` wants the doctor's options, not every
+    // command's. Not under a log shipper, where the error is the record.
     if (parsingArguments && !jsonLog) {
-      writeLine(streams.stderr, '');
-      writeLine(streams.stderr, HELP_TEXT);
+      writeLine(streams.stderr, usagePointer(argv));
     }
     return 1;
   }

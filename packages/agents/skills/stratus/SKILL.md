@@ -242,7 +242,7 @@ Work that takes minutes doesn't have to hold the conversation. Under the daemon,
 | `stratus memory reassert` | Re-label memories' trust as the operator; no tool can |
 | `stratus memory passes` / `stratus memory undo-pass` | What memory passes did (status, counts, what each read; `memory list --pass` for what one wrote), and take one back |
 | `stratus session rollover <id>` | Start a long conversation over under the same id, keeping the old transcript |
-| `stratus version` / `stratus help` | The version, and the full reference for every flag |
+| `stratus version` / `stratus help` | The version, and the full reference for every flag; `stratus help <command>` (or `stratus <command> --help`) for one command's usage and options |
 
 ## What you can do, and what to ask for
 

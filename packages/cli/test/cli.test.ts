@@ -1504,7 +1504,7 @@ test('runCli reports missing prompt errors', async () => {
 
   assert.equal(exitCode, 1);
   assert.match(output.stderr, /A prompt is required/);
-  assert.match(output.stderr, /Usage:/);
+  assert.match(output.stderr, /^Run `stratus run --help` for its usage\.$/m);
 });
 
 test('runCli reports missing api key errors for real providers', async () => {
@@ -17803,7 +17803,7 @@ test('a command that fails after its arguments parsed prints the error and not t
   assert.doesNotMatch(output.stderr, /Usage:/);
 });
 
-test('a mistyped command still prints the help under the error', async () => {
+test('a mistyped command still points at its help under the error', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   for (const [argv, error] of [
     [['run', '--bogus'], /^Error: Unknown option: --bogus$/m],
@@ -17814,7 +17814,8 @@ test('a mistyped command still prints the help under the error', async () => {
     const exitCode = await runCli({ argv: [...argv], streams, env: { homeDir: home, cwd: home, processEnv: {} } });
     assert.equal(exitCode, 1, argv.join(' '));
     assert.match(output.stderr, error);
-    assert.match(output.stderr, /Usage:/, argv.join(' '));
+    assert.match(output.stderr, new RegExp(`^Run \`stratus ${argv[0]} --help\` for its usage\\.$`, 'm'), argv.join(' '));
+    assert.doesNotMatch(output.stderr, /Usage:/, 'one line, not the whole help');
   }
 });
 
