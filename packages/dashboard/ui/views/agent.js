@@ -174,7 +174,7 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
   /**
    * Searches every conversation, not just the 50 listed, a moment after
    * typing stops. The list filters what it has at once meanwhile; the
-   * daemon's answer replaces it, latest only.
+   * daemon's answer replaces it for the query it answered, latest only.
    */
   let searches = 0;
   let searchTimer;
@@ -190,7 +190,8 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     if (ticket !== searches || listed === undefined) {
       return;
     }
-    state.found = listed.sessions ?? [];
+    // Tagged with its query: once the box says something else, it no longer applies.
+    state.found = { query, sessions: listed.sessions ?? [] };
     update();
   };
   const search = el('input', {
@@ -731,7 +732,8 @@ export const renderAgent = (agentId, initialSessionId, initialTab, fresh) => {
     const drawer = state.tab === 'chat' && state.drawerOpen
       ? conversationDrawer({
           current,
-          sessions: state.found ?? state.sessions,
+          sessions: state.sessions,
+          found: state.found,
           sessionId: state.sessionId,
           unsent: state.unsent,
           titles: state.titles,

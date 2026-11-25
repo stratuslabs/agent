@@ -72,3 +72,30 @@ export const conversationTitle = (session, context = {}) => {
       return 'Conversation';
   }
 };
+
+/**
+ * What a search box matches a conversation on: its whole title, never the
+ * cut one a row shows, so text past the cut is still found.
+ */
+export const searchableTitle = (session, context = {}) => (typeof session.title === 'string' && session.title.trim()
+  ? session.title.trim()
+  : conversationTitle(session, context));
+
+/**
+ * The conversations the drawer shows for the text in its search box.
+ * `found` is the daemon's search, `{ query, sessions }`: it matched every
+ * stored title in full, so for the query it answered it's shown as it
+ * came. Until it answers the text now in the box (or if it failed), the
+ * listed conversations are filtered here, on `titleOf`.
+ */
+export const drawerSessions = ({ sessions, found, query, titleOf }) => {
+  const text = query.trim();
+  if (!text) {
+    return sessions;
+  }
+  if (found !== undefined && found.query === text) {
+    return found.sessions;
+  }
+  const needle = text.toLowerCase();
+  return sessions.filter((session) => titleOf(session).toLowerCase().includes(needle));
+};
