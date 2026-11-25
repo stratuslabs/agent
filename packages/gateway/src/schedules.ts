@@ -741,6 +741,19 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
    * a delivery matches. Refused for a source the operator hasn't configured,
    * now, while the person approving it can hear why.
    */
+  /**
+   * Writes a new row only while its agent is on the roster, checked with no
+   * await before the write: a destination check awaits, and a delete can
+   * reload the roster meanwhile. A delete sweeps the agent's schedules once
+   * the reload is done, so a row written after it would outlive the agent.
+   */
+  const insertForRosterAgent = (record: ScheduleRecord): void => {
+    if (!hasAgent(record.agentId)) {
+      throw new Error(`Agent not found: ${record.agentId}`);
+    }
+    store.insert(record);
+  };
+
   const createTrigger = async (input: ScheduleCreateInput): Promise<ScheduleRecord> => {
     if (input.cadence.kind !== 'event') {
       throw new Error('createTrigger takes an event cadence.');
@@ -768,7 +781,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(input.trust ? { trust: input.trust } : {}),
     };
-    store.insert(record);
+    insertForRosterAgent(record);
     log(`event trigger ${record.id} created for ${record.agentId} on source ${input.cadence.source}${record.destination ? `, reports to ${canonicalDestination(record.destination)}` : ''}`);
     return record;
   };
@@ -803,7 +816,7 @@ export const createSchedulerRuntime = (options: SchedulerRuntimeOptions): Schedu
         ...(input.trust ? { trust: input.trust } : {}),
         nextFireAt: next.toISOString(),
       };
-      store.insert(record);
+      insertForRosterAgent(record);
       log(`schedule ${record.id} created for ${record.agentId} — first firing ${record.nextFireAt}${record.destination ? `, reports to ${canonicalDestination(record.destination)}` : ''}`);
       return record;
     },

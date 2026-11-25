@@ -218,6 +218,53 @@ test('a new agent can claim a deleted id only once the old one is cleaned up, an
   }
 });
 
+test('a schedule a racing turn makes after the first sweep is cancelled once the roster has reloaded', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', AVA);
+  const agents = path.join(home, '.stratus', 'agents');
+  const grants = createFileCommandWhitelist({ directory: agents, stateHome: path.join(home, '.stratus') });
+  // Holds the delete in its grant cleanup, after its schedules were swept
+  // and before the roster reloads: where a turn that slipped past the busy
+  // check could still make one.
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let entered!: () => void;
+  const reached = new Promise<void>((resolve) => { entered = resolve; });
+  let block = true;
+  const held = new Proxy(grants, {
+    get(target, key) {
+      const value = Reflect.get(target, key) as unknown;
+      if (key === 'grantsFor' && block) {
+        return async (agentId: string) => {
+          block = false;
+          entered();
+          await gate;
+          return target.grantsFor(agentId);
+        };
+      }
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+
+  const harness = await startApi({ home, options: { grants: held } });
+  try {
+    await scheduleFor(home, 'sched-ava', 'ava');
+    await scheduleFor(home, 'sched-stratus', 'stratus');
+    const deleting = harness.call('/api/v1/agents/ava', { method: 'DELETE' });
+    await reached;
+    await scheduleFor(home, 'sched-ava-late', 'ava');
+    release();
+    const removed = await deleting;
+    assert.equal(removed.status, 200);
+    assert.deepEqual((await json<{ schedulesCancelled: string[] }>(removed)).schedulesCancelled, ['sched-ava', 'sched-ava-late']);
+    const schedules = await json<{ schedules: Array<{ id: string }> }>(await harness.call('/api/v1/schedules'));
+    assert.deepEqual(schedules.schedules.map((schedule) => schedule.id), ['sched-stratus']);
+  } finally {
+    release();
+    await harness.stop();
+  }
+});
+
 test('a delete whose grants could not be revoked still answers, and says so', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', AVA);

@@ -384,6 +384,12 @@ export const rosterRoutes: Route[] = [
       // they're gone, so the cleanup never reaches it.
       let moved = false;
       let done: { soulMovedTo: string; schedulesCancelled: string[]; grantsRevoked?: number; grantsNote?: string };
+      // Its schedules would fail at every firing with no agent to run, so
+      // they go; a cancel also revokes the destination grant on the row.
+      const cancelSchedules = (): string[] => context.gateway.schedules()
+        .filter((record) => record.agentId === agentId)
+        .map((record) => record.id)
+        .filter((id) => context.gateway.cancelSchedule(id));
       try {
         done = await withSoulFileLock(async () => {
           const summaries = await listAgentSummaries(context.env, () => {}, context.configPath);
@@ -422,12 +428,7 @@ export const rosterRoutes: Route[] = [
           // Moved aside, never deleted: putting it back restores the agent.
           const soulMovedTo = await retireSoulFile(context.env, summary.soulPath, agentId);
           moved = true;
-          // Its schedules would fail at every firing with no agent to run,
-          // so they go; a cancel also revokes the destination grant on the row.
-          const schedulesCancelled = context.gateway.schedules()
-            .filter((record) => record.agentId === agentId)
-            .map((record) => record.id)
-            .filter((id) => context.gateway.cancelSchedule(id));
+          const schedulesCancelled = cancelSchedules();
           // And its standing grants: a new agent later given this id must ask
           // again, not inherit what this one was allowed.
           if (!context.grants) {
@@ -453,22 +454,29 @@ export const rosterRoutes: Route[] = [
           await context.gateway.reloadRosterAndChannels();
         }
       }
-      // A turn that started between the busy check above and that reload
-      // is not refused by either, and would run on with the soul it had
-      // cached. Stopped, so a delete that answers has stopped the agent
-      // everywhere. Unless the id is on the roster again: then a new agent
-      // claimed it once the cleanup was done, and those turns are its own.
-      if (!context.gateway.agents().some((agent) => agent.id === agentId)) {
+      // A turn that started between the busy check above and that reload is
+      // refused by neither: it runs on with the soul it had cached, and can
+      // make a schedule after the sweep above. From the reload on, nothing
+      // can (dispatch refuses the agent, and a schedule checks the roster
+      // right before it's written), so the turn is stopped and the sweep
+      // runs once more. Under the lock, so no new agent takes the id
+      // meanwhile; and not at all if one already has, because then what
+      // runs under the id is its own.
+      const lateSchedules = await withSoulFileLock(async () => {
+        if (context.gateway.agents().some((agent) => agent.id === agentId)) {
+          return [];
+        }
         for (const row of context.gateway.store.list(agentId)) {
           if (row.status === 'running' || row.status === 'pending_approval') {
             context.gateway.abortTurns(row.id, `${agentId} was deleted.`);
           }
         }
-      }
+        return cancelSchedules();
+      });
       return {
         agentId,
         soulMovedTo: done.soulMovedTo,
-        schedulesCancelled: done.schedulesCancelled,
+        schedulesCancelled: [...done.schedulesCancelled, ...lateSchedules],
         ...(done.grantsRevoked !== undefined ? { grantsRevoked: done.grantsRevoked } : {}),
         ...(done.grantsNote !== undefined ? { grantsNote: done.grantsNote } : {}),
       };
