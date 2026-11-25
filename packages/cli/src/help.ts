@@ -751,8 +751,8 @@ Soul files:
  * command's description lists as "also:", plus a second word that is an
  * action of the entry, not an entry of its own. Without these, `stratus
  * skill list --help` would find the three `skill …` entries instead of
- * `skills`. Only forms the CLI runs: a bare `stratus schedule` is an
- * unknown command, so a pointer must not send anyone to its help.
+ * `skills`. They also put the entry in its family's help: `stratus skill
+ * --help` lists `skills` with the rest of what `stratus skill` takes.
  */
 const ALIASES: Readonly<Record<string, string>> = {
   'agent list': 'agents',
@@ -792,7 +792,8 @@ export const HELP_TEXT = `Stratus Agent CLI\n\n${renderHelp(USAGE, COMMANDS, AGE
 
 const entriesNamed = (key: string): readonly HelpEntry[] => {
   const name = ALIASES[key] ?? key;
-  return COMMANDS.filter((entry) => entry.name === name || entry.name.startsWith(`${name} `));
+  const aliased = new Set(Object.entries(ALIASES).filter(([alias]) => alias.startsWith(`${key} `)).map(([, target]) => target));
+  return COMMANDS.filter((entry) => entry.name === name || entry.name.startsWith(`${name} `) || aliased.has(entry.name));
 };
 
 /**

@@ -138,6 +138,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
     return { command: 'version' };
   }
 
+  // `schedule` and `plugin` are commands only with an action after them
+  // (`schedule list`), but their help is the family's, like `skill --help`.
+  if ((command === 'schedule' || command === 'plugin') && (rest[0] === '--help' || rest[0] === '-h')) {
+    return { command: 'help' };
+  }
+
   if (command === 'dashboard') {
     return parseDashboardCommand(rest);
   }

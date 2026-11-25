@@ -91,6 +91,30 @@ test('a family name or an also-form finds the help it means', async () => {
   assert.equal((await run(['tasks', 'cancel', '--help'])).stdout, (await run(['tasks', '--help'])).stdout);
   // A prompt is not a command.
   assert.equal((await run(['run', 'Say hello', '--help'])).stdout, (await run(['run', '--help'])).stdout);
+
+  // A family's help includes the entry its `list` form belongs to.
+  for (const [family, entry] of [['agent', 'agents'], ['credential', 'credentials'], ['skill', 'skills'], ['session', 'sessions'], ['schedule', 'schedules'], ['plugin', 'plugins']] as const) {
+    const help = (await run([family, '--help'])).stdout;
+    assert.match(help, new RegExp(`^ {2}${entry} `, 'm'), `${family} --help shows ${entry}`);
+  }
+});
+
+test('every word the help resolves runs as --help', async () => {
+  // A form the help answers for and the CLI rejects would send someone
+  // from a usage error to a second one.
+  const commands = sectionNames(HELP_TEXT, 'Commands:').filter((name) => name !== 'help' && name !== 'version');
+  const forms = new Set([
+    ...commands.map((name) => name.split(' ')[0] ?? ''),
+    'agent list', 'schedule', 'schedule list', 'schedule cancel', 'plugin', 'plugin list',
+    'skill list', 'session list', 'credential list', 'signins', 'channels', 'memory unpin',
+  ]);
+  for (const form of forms) {
+    const argv = [...form.split(' '), '--help'];
+    const result = await run(argv);
+    assert.equal(result.exitCode, 0, `${argv.join(' ')}: ${result.stderr}`);
+    assert.ok(result.stdout.length > 0 && result.stdout.length < HELP_TEXT.length / 4, `${argv.join(' ')} is one command's part`);
+    assert.equal((await run(['help', ...form.split(' ')])).stdout, result.stdout, `help ${form}`);
+  }
 });
 
 test('every command in the help has a help of its own, and every option is in one', async () => {
@@ -129,6 +153,9 @@ test('a usage error prints the error and one line pointing at that command\'s he
     [['memory', 'list', '--trust', 'nope'], 'Unsupported trust level: nope. Use one of user, agent, unknown, external.', 'stratus memory list --help'],
     [['agent', 'delete'], 'Unknown agent subcommand: delete. Try: stratus agent new, stratus agent list', 'stratus agent --help'],
     [['schedule', 'list', '--bogus'], 'Unknown option: --bogus', 'stratus schedule list --help'],
+    // Only `schedule list` and `schedule cancel` run, but `schedule --help` does too.
+    [['schedule', 'bogus'], 'Unknown command: schedule', 'stratus schedule --help'],
+    [['plugin', 'bogus'], 'Unknown command: plugin', 'stratus plugin --help'],
   ] as const) {
     const result = await run([...argv]);
     assert.equal(result.exitCode, 1, argv.join(' '));
@@ -144,10 +171,6 @@ test('an unknown command, or help for one, points at the whole list', async () =
   for (const [argv, error] of [
     [['frob'], 'Unknown command: frob'],
     [['help', 'frob'], 'Unknown command: frob'],
-    // Only `schedule list` and `schedule cancel` exist; `schedule --help`
-    // would be the same error, so the pointer must not name it.
-    [['schedule', 'bogus'], 'Unknown command: schedule'],
-    [['plugin', 'bogus'], 'Unknown command: plugin'],
   ] as const) {
     const result = await run([...argv]);
     assert.equal(result.exitCode, 1, argv.join(' '));
