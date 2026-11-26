@@ -132,10 +132,13 @@ export {
   promotedVersionPath,
   gatewayInfoPath,
   grantsLockPath,
+  homeLockPath,
+  updateLockPath,
 } from './paths.ts';
 
 export {
   claimFileLock,
+  fileLockHeld,
   FileLockHeldError,
   type FileLock,
   GRANTS_LOCK_WAIT_MS,
@@ -288,6 +291,9 @@ export {
 
 export {
   type ResolvedConfigLocation,
+  type ConfigDiscovery,
+  type SkippedConfigFile,
+  discoverConfigLocation,
   resolveConfigLocation,
   discoverActiveConfig,
   type TrustedConfigBlock,
@@ -297,7 +303,8 @@ export {
 } from './config-location.ts';
 
 export {
-  DEFAULT_STRATUS_AGENT,
+  LEGACY_DEFAULT_AGENT_ID,
+  stratusPersona,
   EVERY_TOOL,
   resolveSoulPath,
   resolveSoul,
@@ -341,6 +348,8 @@ export {
 export {
   createDemoTool,
   createDemoProvider,
+  DEMO_TOOL_NAME,
+  toolsForRuntime,
   FALLBACK_ACTIVE_METADATA_KEY,
   PROVIDER_STATE_METADATA_KEYS,
   redactProviderReplayState,

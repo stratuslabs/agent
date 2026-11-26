@@ -32,8 +32,9 @@ import {
   ROLLED_OVER_TO_METADATA_KEY,
   ShardedSessionStore,
 } from '../src/index.ts';
+import { withDefaultAgent } from './default-agent.ts';
 
-const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-prov-'));
+const newHome = async (): Promise<string> => withDefaultAgent(await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-prov-')));
 
 const AGENT = { id: 'ava', name: 'Ava', tools: ['*'] };
 

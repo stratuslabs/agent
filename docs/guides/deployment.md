@@ -62,9 +62,17 @@ stratusd ok at http://0.0.0.0:4123 — version 0.11.6, up 8s, 1 agent, 0 session
 
 The address is the container's own: `0.0.0.0` inside it, published as
 `127.0.0.1:4123` on the host. To prove the plumbing first, put
-`STRATUS_PROVIDER=demo` in `stratusd.env` for the offline demo provider. With
+`STRATUS_PROVIDER=demo` in `stratusd.env` for the offline demo provider
+(an agent whose soul pins a provider keeps its pin). With
 no provider named and no sign-in stored, the daemon starts but refuses every
 turn.
+
+A fresh volume has no agent yet either: no agent is defined in code, so the
+daemon refuses every turn until it has one. `docker compose exec stratusd
+stratus agent new` asks for a name and saves the soul in the volume, or
+apply the VM profile below, which brings its own `ops` agent. A volume an
+earlier release used with its built-in `stratus` agent gets a `stratus.md`
+soul on its first start instead, and carries on.
 
 For [`tool-browser`](./browser.md), set `target: browser` in
 [`compose.yaml`](../../deploy/docker/compose.yaml) (and a different
@@ -149,6 +157,10 @@ Run every other command as the account, so it reads the same home:
 `sudo -u stratus -H stratus logs -f`. `stratus setup` works the same way;
 decline the always-on service it offers at the end, because this unit is
 the service.
+
+A fresh home has no agent yet, so make one before the first turn:
+`sudo -u stratus -H stratus agent new` at a terminal, or `stratus setup`,
+which makes your first agent if there is none.
 
 `deploy/systemd/smoke.sh` runs these steps on a throwaway Linux machine
 with systemd, from this checkout's packed packages and on the demo
@@ -246,8 +258,10 @@ livenessProbe:
 
 A check that lands inside an announced restart (`stratus restart`) fails:
 the old daemon removes `gateway.json` when it stops serving and the new one
-writes it when its API binds, and the check says "not serving" in between.
-That is what `retries` / `failureThreshold` are for.
+writes it when its API binds, and the check says the daemon is running but
+has not published a control API in between. That is what `retries` /
+`failureThreshold` are for. A daemon without `@stratusagent/control-api`
+fails every check, and the message says the package isn't installed.
 
 A platform check that cannot send the token (a Fly machine check, a
 Kubernetes `httpGet` probe) can use `GET /api/v1/livez`, which needs no

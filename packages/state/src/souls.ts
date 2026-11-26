@@ -14,17 +14,25 @@ import {
 import { agentsDirPath, foldedAgentId } from './paths.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
-// The agent every run uses when no soul is configured. A Stratus agent is
-// a Stratus agent — never "the model" — whichever provider serves it.
-export const DEFAULT_STRATUS_AGENT = {
-  id: 'stratus',
-  name: 'Stratus',
-  instructions: 'You are Stratus, a personal agent on the Stratus Agent platform. Be warm, direct, and concise. When asked who or what you are, you are Stratus — a Stratus agent — regardless of which model is serving the conversation.',
-  // Every tool, as it always had. It has no soul file to write a list
-  // into, so it says so here instead of relying on an omitted list, which
-  // is safe tools only on a home this build set up.
-  tools: ['*'],
-};
+/**
+ * The id of the agent that used to live in code and answer every run with
+ * no soul. No agent is defined in code any more; this stays for what reads
+ * that agent's history: the upgrade that writes it a soul
+ * (`migrations/stratus-soul.ts`), the legacy memory ids that read as it
+ * (`withLegacyDefaultMemories`), and the per-agent layout moves, which ran
+ * while it was still built in.
+ */
+export const LEGACY_DEFAULT_AGENT_ID = 'stratus';
+
+/**
+ * The persona a first agent gets from setup, with its name in it. With the
+ * name Stratus it is word for word what the old built-in agent was told,
+ * so an upgraded home's agent and a fresh one start the same. A Stratus
+ * agent is a Stratus agent, never "the model", whichever provider serves it.
+ */
+export const stratusPersona = (name: string): string =>
+  `You are ${name}, a personal agent on the Stratus Agent platform. Be warm, direct, and concise. `
+  + `When asked who or what you are, you are ${name} — a Stratus agent — regardless of which model is serving the conversation.`;
 
 /**
  * The `tools:` list that grants every registered tool. An omitted list is
@@ -86,9 +94,13 @@ export const resolveConfiguredSoul = async (
   selection: RuntimeSelection,
   env: StateEnvironment = {},
 ): Promise<{ soul: ParsedSoul; path: string } | undefined> => {
-  const configLocation = await resolveConfigLocation(selection, env);
-  const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
-  const soulPath = resolveSoulPath(selection, env, fileConfig, configLocation?.trusted);
+  // A preset snapshot is read the way resolveRuntimeConfig reads it, so a
+  // caller holding one resolves the identity from the same read as the
+  // runtime instead of discovering again.
+  const preset = selection.presetConfig;
+  const configLocation = preset !== undefined ? undefined : await resolveConfigLocation(selection, env);
+  const fileConfig = preset?.config ?? (configLocation ? await loadConfigFile(configLocation.path) : {});
+  const soulPath = resolveSoulPath(selection, env, fileConfig, preset !== undefined ? preset.trusted : configLocation?.trusted);
   if (!soulPath) {
     return undefined;
   }
@@ -286,20 +298,6 @@ export const loadRosterSouls = async (
       warn(`skipping ${soulPath}: ${error instanceof Error ? error.message : String(error)}`);
       continue;
     }
-    // Reserved ids are dropped BEFORE collision detection, and the order
-    // matters. A soul claiming the built-in id — in whatever case, since
-    // `agents/Stratus/` is the built-in agent's own state directory
-    // wherever case folds — is skipped either way, because it may not take
-    // the documented fallback over. So two of them are not an ambiguity to
-    // refuse over: neither was going to get the id. Left
-    // after the check, a repository could take a daemon down simply by
-    // shipping two souls named `stratus`, turning a guard against hijack
-    // into a way to deny service.
-    if (foldedAgentId(entry.soul.agent.id) === DEFAULT_STRATUS_AGENT.id) {
-      warn(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${soulPath}`);
-      continue;
-    }
-
     const claimed = byId.get(foldedAgentId(entry.soul.agent.id));
     if (claimed !== undefined) {
       throw new DuplicateAgentIdError(claimed.id, [claimed.path, soulPath], entry.soul.agent.id);

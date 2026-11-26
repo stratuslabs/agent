@@ -362,8 +362,8 @@ const planTemplateInstall = async (
   // this command is not the place to refuse over somebody else's duplicate.
   // `declaredAgentIds`, not a roster read of this command's own: it is the
   // set an id is actually claimed against — the roster, the configured
-  // default soul (which can live outside `agents/` and still be served),
-  // and the built-in `stratus`. Reading the roster alone said "available"
+  // default soul (which can live outside `agents/` and still be served).
+  // Reading the roster alone said "available"
   // for ids the daemon would then hand to somebody else.
   // Pinned to the global config, because that is the one this command
   // merges into. Unpinned, `declaredAgentIds` resolves the configured soul

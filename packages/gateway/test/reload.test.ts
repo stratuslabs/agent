@@ -18,8 +18,9 @@ import {
   type GatewayChannelAdapter,
   type RestartOutcome,
 } from '../src/index.ts';
+import { withDefaultAgent } from './default-agent.ts';
 
-const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-reload-'));
+const newHome = async (): Promise<string> => withDefaultAgent(await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-reload-')));
 
 const writeSoul = async (home: string, file: string, contents: string): Promise<void> => {
   const dir = path.join(home, '.stratus', 'agents');

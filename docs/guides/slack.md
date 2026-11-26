@@ -287,6 +287,9 @@ first tool, since it may decide to say nothing; one that then stays
 silent clears it. Slack takes the status down whenever the agent's app posts
 in the thread, so the agent puts it back after its own posts, uploads,
 answered approvals, and a `message.send` from another of its sessions.
+In a DM, where its replies don't go in a thread, the status sits under your
+newest message: send three more while a long tool runs and the status moves
+down to the last one, rather than one "is thinking…" under each.
 
 Messages you send while it is still working reach it at its next step:
 once the tool it is running finishes, it reads them before it decides what

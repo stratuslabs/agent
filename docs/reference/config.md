@@ -9,7 +9,19 @@ Precedence, highest first:
    `STRATUS_SOUL`, `STRATUS_CONFIG`, …
 3. **Soul file hints** — a soul's `provider:`/`model:` frontmatter
 4. **Config file** — a project-local `stratus.config.json` outranks the
-   global `~/.stratus/config.json`
+   global `~/.stratus/config.json`. One that can't be read or parsed is
+   skipped with a warning, and the global file applies; a file you name with
+   `--config` or `STRATUS_CONFIG` has to load, or the run fails
+
+That order is for a run (`stratus run`, `stratus chat`). Under `stratus
+serve`, one environment serves every agent, so `STRATUS_PROVIDER` and
+`STRATUS_MODEL` are daemon-wide defaults instead, and each pin in a soul
+outranks its own variable: `provider:` beats `STRATUS_PROVIDER`, and
+`model:` beats `STRATUS_MODEL`. A setting the soul doesn't pin still
+follows the variable. When a `provider:` pin moves an agent off the
+daemon-wide default provider, and that default isn't `demo`, the default's
+model, endpoint (`STRATUS_BASE_URL`) and generic key (`STRATUS_API_KEY`)
+were chosen for another service, so that agent doesn't get them.
 
 When none of these names a provider, a run uses the one provider you have
 signed in to and says so. A ChatGPT sign-in counts once it allows using your

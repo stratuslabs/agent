@@ -1,8 +1,10 @@
 # CLI reference
 
 Every command, then every flag. `stratus --help` prints the same surface;
-each command's behavior is documented in depth in the guide the table
-links to.
+`stratus <command> --help` (or `stratus help <command>`) prints only that
+command's usage, description and options, and a mistyped command prints
+the error and one line pointing there. Each command's behavior is
+documented in depth in the guide the table links to.
 
 ## Commands
 
@@ -175,7 +177,7 @@ stratus dashboard                      # local browser dashboard
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--env <VAR>` | `stratus credential set`: also bind the key to that variable for the `--agent` agent's shell, as `credential env` does |
 | `--remove` | `stratus credential env`: drop the binding instead of making it |
-| `--help`, `-h` | Show help |
+| `--help`, `-h` | Show help: after a command, only that command's |
 
 `stratus credential set` takes the value on **stdin and never in a flag** —
 a secret in argv is a secret in your shell history and in every `ps` on the
@@ -190,9 +192,7 @@ begins or ends with a space is stored as it is rather than quietly altered.
 terminal it asks for the token without echoing it, otherwise it reads it
 from stdin, and nothing prints it back. It refuses an Anthropic API key
 (`sk-ant-api…`), which would be refused on every turn as a subscription
-token, an agent id that is not on the roster, and the built-in `stratus`
-agent, which has no soul file and always runs on the shared sign-in (a
-configured default soul that takes the `stratus` id over is accepted).
+token, and an agent id that is not on the roster.
 The roster it checks is the one the default config names; for a daemon
 started with `--config <file>`, pass the same `--config <file>` to
 `signin set`.

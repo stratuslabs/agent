@@ -13,7 +13,6 @@ import { WhitelistUnreadableError } from '@stratusagent/permissions';
 import {
   agentsDirPath,
   claimSoulFile,
-  DEFAULT_STRATUS_AGENT,
   listAgentSummaries,
   loadSoulFile,
   parseProviderName,
@@ -41,26 +40,13 @@ const validateProvider = (value: string, field: string): void => {
  * How strongly a summary claims its id, by the gateway's own rules.
  *
  * `listAgentSummaries` describes *files*, and two files can name one id: a
- * configured default soul shadowing a roster file, or a roster file claiming
- * the reserved built-in id. A last-write-wins map would enrich a live agent
- * with the persona, soul path, resolved runtime, and flags of the file it is
- * *not* running, so the pair is settled the way `loadRoster` settles it:
- *
- * - The configured default soul replaces whatever shares its id, the pathless
- *   built-in source included — `defaultAgentId` re-registers over a source
- *   with no `soulPath`, which is exactly what the built-in is. A configured
- *   soul declaring `id: stratus` is therefore the agent being served, and
- *   ranking the built-in over it reported the served soul as built-in and
- *   uneditable, hiding its own persona and settings behind the stock ones.
- * - Nothing else may take the reserved id: an ordinary roster file claiming
- *   `stratus` is skipped at load with a warning.
+ * configured default soul shadowing a roster file. A last-write-wins map
+ * would enrich a live agent with the persona, soul path, resolved runtime,
+ * and flags of the file it is *not* running, so the pair is settled the way
+ * `loadRoster` settles it: the configured default soul replaces whatever
+ * shares its id.
  */
-const idClaim = (summary: AgentSummary): number => {
-  if (summary.default) {
-    return 2;
-  }
-  return summary.id === DEFAULT_STRATUS_AGENT.id && summary.builtIn ? 1 : 0;
-};
+const idClaim = (summary: AgentSummary): number => (summary.default ? 1 : 0);
 
 /** Summaries keyed by id, keeping the one the daemon is actually serving. */
 export const summariesById = (summaries: AgentSummary[]): Map<string, AgentSummary> => {
@@ -88,7 +74,7 @@ const soulForAgent = async (
     throw new ApiError(
       409,
       'agent_not_editable',
-      `${agentId} is the built-in agent and has no soul file to edit. Create your own agent instead.`,
+      `${agentId} has no soul file to edit.`,
     );
   }
   return { soul: await loadSoulFile(summary.soulPath), path: summary.soulPath };
@@ -160,7 +146,9 @@ export const rosterRoutes: Route[] = [
             id: agent.id,
             name: agent.name,
             default: summary?.default ?? false,
-            builtIn: summary?.builtIn ?? agent.id === DEFAULT_STRATUS_AGENT.id,
+            // Always false: every agent has a soul file. Kept for readers
+            // built against the field.
+            builtIn: false,
             // Omitted rather than guessed when no file backs this agent.
             // The gateway keeps dispatching from a cached soul when its file
             // is deleted or momentarily unparseable, and that soul may pin a
@@ -415,8 +403,8 @@ export const rosterRoutes: Route[] = [
           if (!summary || !context.gateway.agents().some((agent) => agent.id === agentId)) {
             throw new ApiError(404, 'agent_not_found', `No agent with id ${agentId}.`);
           }
-          if (summary.builtIn || !summary.soulPath) {
-            throw new ApiError(409, 'agent_not_removable', `${agentId} is the built-in agent, which has no soul file and can't be deleted.`);
+          if (!summary.soulPath) {
+            throw new ApiError(409, 'agent_not_removable', `${agentId} has no soul file to delete.`);
           }
           // The config names this soul (`soul`), so the daemon would refuse
           // to start without it. The fix is in the config, not here.

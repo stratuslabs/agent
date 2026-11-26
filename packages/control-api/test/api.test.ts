@@ -8,7 +8,7 @@ import path from 'node:path';
 import { createGateway } from '@stratusagent/gateway';
 
 import { CONTROL_API_VERSION, createControlApi } from '../src/index.ts';
-import { newHome, openSocket, rawPost, settles, startApi, writeSoul } from './harness.ts';
+import { bareHome, newHome, openSocket, rawPost, settles, startApi, writeSoul } from './harness.ts';
 
 const json = async <T>(response: Response): Promise<T> => response.json() as Promise<T>;
 
@@ -31,7 +31,10 @@ test('the roster is served as data, avatar palette included', async () => {
     assert.equal(typeof avatar.hue, 'number');
     assert.ok(avatar.palette.length > 0);
 
-    assert.ok(agents.some((agent) => agent.builtIn === true), 'the built-in agent is listed too');
+    // No agent lives in code: every one listed has a soul file, the setup
+    // default included, and none is flagged built in.
+    assert.ok(agents.every((agent) => agent.builtIn === false && typeof agent.soulPath === 'string'), JSON.stringify(agents));
+    assert.equal(agents.find((agent) => agent.default === true)?.id, 'stratus');
   } finally {
     await harness.stop();
   }
@@ -149,13 +152,13 @@ test('editing a soul round-trips through the parser and refuses an id change', a
     });
     assert.ok(broken.status === 400 || broken.status === 409, `expected a refusal, got ${broken.status}`);
 
-    // The built-in has no file to edit and says so rather than 500ing.
-    const builtIn = await harness.call('/api/v1/agents/stratus', {
+    // The stratus agent has a soul file like any other, so it can be edited.
+    const stratus = await harness.call('/api/v1/agents/stratus', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ instructions: 'nope' }),
+      body: JSON.stringify({ instructions: 'You are Stratus, edited.' }),
     });
-    assert.equal(builtIn.status, 409);
+    assert.equal(stratus.status, 200);
   } finally {
     await harness.stop();
   }
@@ -1598,9 +1601,9 @@ test('one agent reads back with its whole persona, not the roster snippet', asyn
     const after = await json<{ agent: { instructions: string } }>(await harness.call('/api/v1/agents/ava'));
     assert.equal(after.agent.instructions, instructions, 'a name change did not truncate the persona');
 
-    // The built-in has no soul file, and says so rather than 500ing.
-    const builtIn = await harness.call('/api/v1/agents/stratus');
-    assert.equal(builtIn.status, 409);
+    // The stratus agent reads back from its soul file like any other.
+    const stratus = await harness.call('/api/v1/agents/stratus');
+    assert.equal(stratus.status, 200);
     const missing = await harness.call('/api/v1/agents/nobody');
     assert.equal(missing.status, 404);
   } finally {
@@ -1984,28 +1987,25 @@ test('the catalog never sends one provider\'s key to another\'s endpoint', async
 });
 
 test('the roster describes the soul the daemon serves, not the one it shadows', async () => {
-  const home = await newHome();
-  // A roster file claiming the reserved built-in id. `loadRosterSouls` skips
-  // it, so the daemon serves the built-in — but `listAgentSummaries` reads the
-  // directory directly and describes both, and a last-write-wins map kept the
-  // wrong one.
-  await writeSoul(
-    home,
-    'impostor.md',
-    '---\nname: Not Stratus\nid: stratus\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nI am not the built-in.\n',
-  );
+  const home = await bareHome();
+  // A configured default soul outside the agents folder declaring the id a
+  // roster file also declares. The daemon serves the configured one, but
+  // `listAgentSummaries` reads the directory too and describes both, and a
+  // last-write-wins map kept the wrong one.
+  await writeSoul(home, 'ava.md', '---\nname: Roster Ava\nid: ava\n---\n\nI am the shadowed file.\n');
+  const served = path.join(home, 'souls', 'ava.md');
+  await mkdir(path.dirname(served), { recursive: true });
+  await writeFile(served, '---\nname: Served Ava\nid: ava\n---\n\nI am the one the daemon serves.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: served }));
   const harness = await startApi({ home });
   try {
-    const { agents } = await json<{ agents: Array<{ id: string; name: string; builtIn: boolean; soulPath?: string }> }>(
+    const { agents } = await json<{ agents: Array<{ id: string; name: string; default: boolean; soulPath?: string }> }>(
       await harness.call('/api/v1/agents'),
     );
-    const stratus = agents.filter((agent) => agent.id === 'stratus');
-    assert.equal(stratus.length, 1);
-    assert.equal(stratus[0]?.builtIn, true, `described the shadowed file: ${JSON.stringify(stratus[0])}`);
-    assert.equal(stratus[0]?.soulPath, undefined, 'the built-in has no soul file');
-
-    const health = await json<{ agents: Array<{ id: string; builtIn: boolean }> }>(await harness.call('/api/v1/health'));
-    assert.equal(health.agents.find((agent) => agent.id === 'stratus')?.builtIn, true);
+    const ava = agents.filter((agent) => agent.id === 'ava');
+    assert.equal(ava.length, 1);
+    assert.equal(ava[0]?.soulPath, served, `described the shadowed file: ${JSON.stringify(ava[0])}`);
+    assert.equal(ava[0]?.default, true);
   } finally {
     await harness.stop();
   }

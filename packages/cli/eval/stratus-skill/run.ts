@@ -56,6 +56,7 @@ import {
   quoteShellArg,
   resolveRuntimeConfig,
   servedRuntimes,
+  toolsForRuntime,
 } from '@stratusagent/state';
 
 import { loadServeMaxTurns, loadServePlugins } from '../../src/trusted-config.ts';
@@ -522,7 +523,8 @@ const main = async (): Promise<void> => {
       registerGatewayTools(tools, memory);
       const runner = new AgentRunner({
         provider,
-        tools,
+        // As the gateway gives it: demo.echo only on the demo provider.
+        tools: toolsForRuntime(tools, config),
         skills,
         memory,
         store: new InMemorySessionStore(),

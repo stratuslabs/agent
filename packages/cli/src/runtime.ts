@@ -36,12 +36,13 @@ import {
   BUILTIN_EXECUTOR_NAME,
   BUILTIN_MEMORY_STORE_NAME,
   createDemoTool,
+  toolsForRuntime,
   createFileCredentialResolver,
   credentialValuesFor,
   createHomeMemoryStore,
   createRuntimeProvider,
+  loadRosterSouls,
   defaultApiKeyEnvName,
-  DEFAULT_STRATUS_AGENT,
   unlistedToolsFor,
   isSignedInRuntime,
   loadCredentials,
@@ -54,6 +55,7 @@ import {
   createPluginStateDirectories,
   createHostProtectedPaths,
   describeServingModel,
+  discoverConfigLocation,
   type RuntimeSelection,
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
@@ -79,6 +81,29 @@ export const resolveRuntimeConfig = (
   command: RuntimeSelection & Partial<Omit<ParsedRunCommand, keyof RuntimeSelection>>,
   env: CliEnvironment = {},
 ): Promise<RuntimeConfig> => resolveStateRuntimeConfig(command, env);
+
+/**
+ * Says that discovery passed over a project config that won't load, and
+ * which file the run uses instead. Asked before the run resolves, not after,
+ * so it is said even when that run then fails for another reason: "no
+ * provider is configured" with nothing about the broken file in this folder
+ * would send someone to setup for the wrong problem. A global config that
+ * can't be read is the resolver's error to report, so nothing is said here.
+ */
+export const warnOnSkippedConfig = async (
+  selection: Pick<RuntimeSelection, 'configPath'>,
+  env: CliEnvironment,
+  streams: CliStreams,
+): Promise<void> => {
+  const { location, skipped } = await discoverConfigLocation(selection, env).catch(() => ({ location: undefined, skipped: undefined }));
+  if (skipped !== undefined) {
+    writeLine(
+      streams.stderr,
+      `Warning: skipping ${skipped.path}, which can't be used (${skipped.reason}). `
+        + `This run uses ${location?.path ?? 'the built-in defaults'} instead.`,
+    );
+  }
+};
 
 /**
  * Says, once the run is up, what an auto-discovered project config asked
@@ -203,6 +228,35 @@ export const warnOnCredentialOverride = async (
 // legacy migration), tools, events, provider (with fallback), and the
 // agent the runtime resolved. run uses it for one shot; chat keeps the
 // runner alive and resumes the same session turn after turn.
+/**
+ * What `run` and `chat` say when no soul resolves. No agent is defined in
+ * code to answer instead, so the command names the ways to get one rather
+ * than talking as a persona nobody made.
+ */
+export const NO_AGENT_TO_RUN = 'No agent to run: no soul is set. Create your first agent with `stratus setup` '
+  + 'or `stratus agent new`, or pass --soul <path>.';
+
+/**
+ * What `run` and `chat` say when no soul resolves, for this home: with
+ * agents on the roster but none the default, it names them, since making
+ * another would not help. A roster that will not load gets the plain advice;
+ * `stratus doctor` names what is wrong with it.
+ */
+export const noAgentToRun = async (env: CliEnvironment): Promise<string> => {
+  let entries: Awaited<ReturnType<typeof loadRosterSouls>> = [];
+  try {
+    entries = await loadRosterSouls(env, () => {});
+  } catch {
+    return NO_AGENT_TO_RUN;
+  }
+  if (entries.length === 0) {
+    return NO_AGENT_TO_RUN;
+  }
+  const named = entries.map((entry) => `${entry.soul.agent.id}: ${entry.path}`).join(', ');
+  return `No default agent is set. Pass --soul with one of yours (${named}), `
+    + 'or pick a default with `stratus setup` → Agent.';
+};
+
 export const createAgentRuntime = async (
   streams: CliStreams,
   options: {
@@ -223,6 +277,10 @@ export const createAgentRuntime = async (
     configPath?: string;
   },
 ) => {
+  const soul = options.runtime.soul;
+  if (soul === undefined) {
+    throw new Error(NO_AGENT_TO_RUN);
+  }
   const runEnv = options.env ?? {};
   await migrateLegacyMemory(runEnv);
   // Routed, as the daemon's is: the memory tools register before the
@@ -403,7 +461,8 @@ export const createAgentRuntime = async (
     const unlistedTools = unlistedToolsFor(runEnv);
     const runner = new AgentRunner({
       provider: runtimeProvider,
-      tools,
+      // demo.echo only for the demo provider, which is what calls it.
+      tools: toolsForRuntime(tools, options.runtime),
       executor: executor ?? createLocalCommandExecutor(),
       approvals: createApprovalPolicy(
         approvalMode,
@@ -413,13 +472,13 @@ export const createAgentRuntime = async (
         options.approvalsDefaulted ?? false,
         approvalMode === 'open'
           ? {
-              gateExternalContent: await externalContentGated(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id),
+              gateExternalContent: await externalContentGated(runEnv, options.configPath, soul.agent.id),
               ...(options.approvalsPosture === 'review'
                 ? {
-                    review: await reviewSettingsIn(runEnv, options.configPath, (options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT).id) ?? {},
+                    review: await reviewSettingsIn(runEnv, options.configPath, soul.agent.id) ?? {},
                     // Read per call, like the daemon's: a store that can't
                     // be read rejects, and the call asks.
-                    secretsFor: () => credentialValuesFor(createFileCredentialResolver(runEnv), options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT),
+                    secretsFor: () => credentialValuesFor(createFileCredentialResolver(runEnv), soul.agent),
                   }
                 : {}),
             }
@@ -436,9 +495,8 @@ export const createAgentRuntime = async (
     hostedRunner = runner;
     await runner.initialize();
 
-    // A soul is a full identity — without one, every provider serves the
-    // same built-in Stratus persona.
-    const agent: AgentDefinition = options.runtime.soul?.agent ?? DEFAULT_STRATUS_AGENT;
+    // A soul is a full identity: persona, tools, memory id.
+    const agent: AgentDefinition = soul.agent;
 
     // The same advisory the daemon gives at roster load, from the same
     // kernel check: a soul enabling a skill whose `requires:` its `tools:`

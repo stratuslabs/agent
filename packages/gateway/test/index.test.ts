@@ -32,8 +32,11 @@ import {
 } from '@stratusagent/agents';
 import { SKILL_READ_TOOL_NAME, latestTurnReply } from '@stratusagent/core';
 import { createHomeMemoryStore, fleetDbIn, legacyMemoryFilePath } from '@stratusagent/state';
+import { withDefaultAgent } from './default-agent.ts';
 
-const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
+/** A home with no agent at all; `newHome` adds the default `stratus` agent. */
+const bareHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-'));
+const newHome = async (): Promise<string> => withDefaultAgent(await bareHome());
 
 const writeSoul = async (home: string, file: string, contents: string): Promise<void> => {
   const dir = path.join(home, '.stratus', 'agents');
@@ -676,7 +679,7 @@ const hangingPolicy = () => ({
 test('a policy that never answers is the turn\'s own time, not a person\'s, and the limit stops it', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
-  const fetchImpl = (async () => openAiToolCall('demo_echo', { text: 'hi' })) as typeof fetch;
+  const fetchImpl = (async () => openAiToolCall('memory_recall', { query: 'hi' })) as typeof fetch;
   const asked: string[] = [];
   const gateway = createGateway({
     env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
@@ -690,7 +693,7 @@ test('a policy that never answers is the turn\'s own time, not a person\'s, and 
       () => gateway.dispatch({ sessionId: 'policy-1', agentId: 'ava', userMessage: 'echo' }),
       (error: Error) => error instanceof RunAbortedError && /time limit of 300ms/.test(error.message),
     );
-    assert.deepEqual(asked, ['demo.echo'], 'the policy was asked, and it is what hung');
+    assert.deepEqual(asked, ['memory.recall'], 'the policy was asked, and it is what hung');
   } finally {
     await gateway.stop();
   }
@@ -1399,6 +1402,7 @@ test('a mid-turn switch to a non-streaming fallback suspends the watchdog for th
   // switch must suspend the timer: the OpenAI fallback emits no deltas, and
   // its slow-but-healthy turn would otherwise be killed as a stall.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'anthropic',
     model: 'model-p',
     fallbackModel: 'model-f',
@@ -1605,6 +1609,7 @@ test('the watchdog arms when a streaming fallback takes over a non-streaming pri
   // mid-turn, the reset delta must arm it: a fallback stream that then
   // stalls has to be cut loose, not held open until an SDK timeout.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'openai',
     model: 'model-p',
     fallbackModel: 'model-f',
@@ -1691,7 +1696,7 @@ test('an agentId-less dispatch answers as the configured default soul', async ()
 });
 
 test('a configured default soul that would share a roster agent\'s directory is ignored', async () => {
-  const home = await newHome();
+  const home = await bareHome();
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
   // A roster agent, and a config-only default declaring the same id in
   // another case. `loadRosterSouls` folds ids against each other, but it
@@ -1710,13 +1715,15 @@ test('a configured default soul that would share a roster agent\'s directory is 
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
-  // Dropped, not served: an agentId-less dispatch falls back to the
-  // built-in, which is the documented answer when there is no usable
-  // default — rather than running as a second agent on Ava's state.
-  const session = await gateway.dispatch({ sessionId: 'folded-default-1', userMessage: 'hello' });
+  // Dropped, not served: an agentId-less dispatch has no default, which
+  // is the documented answer when there is no usable one, rather than
+  // running as a second agent on Ava's state.
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'folded-default-1', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
   await gateway.stop();
 
-  assert.equal(session.agent.id, 'stratus');
   assert.match(warnings.join(' '), /same state directory as ava/);
   assert.match(warnings.join(' '), /rename one of the two ids/);
   // And the roster agent is untouched — this refuses the newcomer, it does
@@ -2097,7 +2104,7 @@ test('the gateway starts when daemon defaults lack credentials the default soul 
 });
 
 test('an unreadable default soul path degrades startup instead of failing it', async () => {
-  const home = await newHome();
+  const home = await bareHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'missing.md' }));
 
@@ -2106,12 +2113,14 @@ test('an unreadable default soul path degrades startup instead of failing it', a
   const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
   await gateway.start();
 
-  // The default route falls back to the built-in agent, with a warning.
-  const session = await gateway.dispatch({ sessionId: 'missing-default-1', userMessage: 'hello' });
+  // The daemon is up; the default route has no agent, and says so, with a
+  // warning naming the soul it could not read.
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'missing-default-1', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
   await gateway.stop();
 
-  assert.equal(session.status, 'completed');
-  assert.equal(session.agent.id, 'stratus');
   assert.ok(warnings.some((line) => line.includes('default soul')), `expected a default-soul warning, got ${JSON.stringify(warnings)}`);
 });
 
@@ -2186,6 +2195,7 @@ test('the sticky-fallback switch is durable while the fallback is still in fligh
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'anthropic',
     model: 'model-p',
     fallbackModel: 'model-f',
@@ -2304,6 +2314,81 @@ test('config degradation serves the last known-good config, never the demo defau
   assert.ok(warnings.some((line) => line.includes('config')));
 });
 
+test('a broken project config in the daemon\'s folder is skipped for the global one, unless the daemon was running on it', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai', model: 'model-global' }));
+  const project = path.join(home, 'checkout');
+  await mkdir(project, { recursive: true });
+  const projectConfig = path.join(project, 'stratus.config.json');
+
+  const requestedModels: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    requestedModels.push((JSON.parse(String(init?.body)) as { model: string }).model);
+    return openAiText('real provider reply');
+  }) as typeof fetch;
+  const env = { homeDir: home, cwd: project, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+
+  // Broken before the daemon ever read it: an untrusted file can't be the
+  // reason nothing dispatches, so the global config serves, and the skip is
+  // said once rather than on every turn.
+  await writeFile(projectConfig, '{ "provider": ');
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  const first = await gateway.dispatch({ sessionId: 'skip-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.dispatch({ sessionId: 'skip-1', userMessage: 'again' });
+  assert.equal(first.status, 'completed');
+  assert.deepEqual(requestedModels, ['model-global', 'model-global']);
+  assert.equal(warnings.filter((line) => line.includes(projectConfig)).length, 1, warnings.join('\n'));
+
+  // Fixed, it is used. Broken again mid-edit, the daemon keeps the project
+  // config it was running on instead of moving to the global one.
+  await writeFile(projectConfig, JSON.stringify({ provider: 'openai', model: 'model-project' }));
+  await gateway.dispatch({ sessionId: 'skip-1', userMessage: 'project now?' });
+  await writeFile(projectConfig, '{ "provider": ');
+  await gateway.dispatch({ sessionId: 'skip-1', userMessage: 'still project?' });
+  await gateway.stop();
+  assert.deepEqual(requestedModels.slice(2), ['model-project', 'model-project']);
+  assert.ok(warnings.some((line) => line.includes('last known-good')), warnings.join('\n'));
+});
+
+test('a project config the daemon ran on that breaks mid-edit keeps routing to the same default agent', async () => {
+  const home = await newHome();
+  // The global config names a default soul. The project config shadows it,
+  // and can't set a soul itself, so there is no default agent here.
+  await writeSoul(home, 'bob.md', '---\nname: Bob\ntools: []\n---\n\nYou are Bob.\n');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\ntools: []\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'model-global',
+    soul: path.join(home, '.stratus', 'agents', 'bob.md'),
+  }));
+  const project = path.join(home, 'checkout');
+  await mkdir(project, { recursive: true });
+  const projectConfig = path.join(project, 'stratus.config.json');
+  await writeFile(projectConfig, JSON.stringify({ provider: 'openai', model: 'model-project' }));
+
+  const fetchImpl = (async () => openAiText('real provider reply')) as typeof fetch;
+  const env = { homeDir: home, cwd: project, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  try {
+    // A turn runs on the project config, so it is what the daemon serves on.
+    const served = await gateway.dispatch({ sessionId: 'route-0', agentId: 'ava', userMessage: 'hi' });
+    assert.equal(served.status, 'completed');
+    await assert.rejects(gateway.dispatch({ sessionId: 'route-1', userMessage: 'hi' }), /No agent to answer this turn/);
+
+    // Mid-edit, discovery would skip the project file for the global one,
+    // whose default soul is Bob. A turn still on the project snapshot must
+    // not be handed to Bob's persona, tools and memory meanwhile.
+    await writeFile(projectConfig, '{ "provider": ');
+    await assert.rejects(gateway.dispatch({ sessionId: 'route-2', userMessage: 'hi' }), /No agent to answer this turn/);
+  } finally {
+    await gateway.stop();
+  }
+});
+
 test('an empty STRATUS_PROVIDER is no default at all for the credential scrub', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
@@ -2368,9 +2453,9 @@ test('WAL sidecars are owner-only for their whole lifetime, reopens included', a
   reopened.close();
 });
 
-test('removing the default soul updates the cached default to the built-in', async () => {
+test('removing the default soul leaves no default, and a broken config does not bring it back', async () => {
   const { unlink } = await import('node:fs/promises');
-  const home = await newHome();
+  const home = await bareHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, 'nova.md'), '---\nname: Nova\n---\n\nYou are Nova.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ soul: 'nova.md' }));
@@ -2384,20 +2469,27 @@ test('removing the default soul updates the cached default to the built-in', asy
 
   // The operator retires the default soul on purpose.
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({}));
-  const asBuiltin = await gateway.dispatch({ sessionId: 'retire-2', userMessage: 'hello' });
-  assert.equal(asBuiltin.agent.id, 'stratus');
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'retire-2', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
 
-  // A later transient config failure must not resurrect Nova — the cached
-  // default is now the built-in.
+  // A later transient config failure must not resurrect Nova: the cached
+  // default is now none.
   await unlink(path.join(home, '.stratus', 'config.json'));
   await writeFile(path.join(home, '.stratus', 'config.json'), '{ broken');
-  const degraded = await gateway.dispatch({ sessionId: 'retire-3', userMessage: 'hello' });
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'retire-3', userMessage: 'hello' }),
+    /No agent to answer this turn/,
+  );
+  // The conversation Nova started keeps Nova.
+  const resumed = await gateway.dispatch({ sessionId: 'retire-1', userMessage: 'still there?' });
   await gateway.stop();
-  assert.equal(degraded.agent.id, 'stratus');
+  assert.equal(resumed.agent.name, 'Nova');
 });
 
 test('the generic key serves a pinned soul when nothing else selects a provider', async () => {
-  const home = await newHome();
+  const home = await bareHome();
   // No config.json, no env/selection provider: the soul is the only
   // provider selector, so STRATUS_API_KEY is its credential — the
   // resolver's own reading of a generic key.
@@ -2521,27 +2613,33 @@ test('a config-only default soul with no tools: list is named too, and a roster-
   assert.equal(once.filter((line) => line.includes('has no tools: list')).length, 1, JSON.stringify(once));
 });
 
-test('a roster soul cannot hijack the reserved built-in agent id', async () => {
-  const home = await newHome();
-  // A roster file whose name slugifies to the reserved id "stratus".
-  await writeSoul(home, 'imposter.md', '---\nname: Stratus\nprovider: openai\nmodel: model-x\n---\n\nI am an imposter.\n');
-
+test('a turn that names no agent fails saying how to make one when there is no default', async () => {
+  const home = await bareHome();
   const warnings: string[] = [];
   const env = { homeDir: home, cwd: home, processEnv: { STRATUS_PROVIDER: 'demo' } };
-  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  const logs: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line), log: (line) => logs.push(line) });
   await gateway.start();
-
-  // The agentId-less route stays the documented built-in fallback.
-  const session = await gateway.dispatch({ sessionId: 'reserved-1', userMessage: 'who are you' });
-  await gateway.stop();
-
-  assert.equal(session.status, 'completed');
-  assert.match(session.agent.instructions ?? '', /Stratus Agent platform/);
-  assert.ok(!(session.agent.instructions ?? '').includes('imposter'));
-  assert.ok(
-    warnings.some((line) => line.includes('reserved for the built-in agent')),
-    `expected a reservation warning, got ${JSON.stringify(warnings)}`,
+  // No agent lives in code to answer for nobody.
+  assert.deepEqual(gateway.agents(), []);
+  assert.ok(logs.includes('stratusd ready — no agents yet'), JSON.stringify(logs));
+  assert.ok(warnings.some((line) => line.includes('no agents yet')), JSON.stringify(warnings));
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'nobody-1', userMessage: 'who are you' }),
+    /No agent to answer this turn.*stratus setup.*stratus agent new/,
   );
+
+  // An agent on the roster is not made the default by being the only one:
+  // the default is what the config says.
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await gateway.reloadRoster();
+  await assert.rejects(
+    () => gateway.dispatch({ sessionId: 'nobody-2', userMessage: 'who are you' }),
+    /No agent to answer this turn/,
+  );
+  const named = await gateway.dispatch({ sessionId: 'named-1', agentId: 'ava', userMessage: 'who are you' });
+  await gateway.stop();
+  assert.equal(named.agent.id, 'ava');
 });
 
 // ---- approval brokering ---------------------------------------------------
@@ -3320,10 +3418,10 @@ test('a duplicate agent id stops the daemon starting, rather than picking a winn
   await gateway.stop();
 });
 
-test('a soul claiming the built-in id is still skipped, not treated as a collision', async () => {
-  const home = await newHome();
+test('a soul declaring the id stratus is an agent like any other', async () => {
+  const home = await bareHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
-  await writeSoul(home, 'impostor.md', '---\nname: Impostor\nid: stratus\n---\n\nYou are an impostor.\n');
+  await writeSoul(home, 'friend.md', '---\nname: Old Friend\nid: stratus\n---\n\nYou are an old friend.\n');
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
 
   const warnings: string[] = [];
@@ -3333,15 +3431,15 @@ test('a soul claiming the built-in id is still skipped, not treated as a collisi
     selection: { provider: 'demo' },
     warn: (line) => warnings.push(line),
   });
-  // Reserved is not duplicated. The built-in fallback is documented, so a
-  // roster file must not be able to take it over — and must not be able to
-  // take the daemon down by trying.
+  // No id is held back for an agent that lives in code: none does.
   await gateway.start();
   const ids = gateway.agents().map((agent) => agent.id).sort();
   assert.deepEqual(ids, ['ava', 'stratus']);
-  assert.equal(gateway.agents().find((agent) => agent.id === 'stratus')?.name, 'Stratus');
-  assert.ok(warnings.some((line) => line.includes('reserved')), JSON.stringify(warnings));
+  assert.equal(gateway.agents().find((agent) => agent.id === 'stratus')?.name, 'Old Friend');
+  assert.ok(!warnings.some((line) => line.includes('reserved')), JSON.stringify(warnings));
+  const session = await gateway.dispatch({ sessionId: 'friend-1', agentId: 'stratus', userMessage: 'hello' });
   await gateway.stop();
+  assert.equal(session.agent.name, 'Old Friend');
 });
 
 test('a hosted tool phase holds the watchdog, on a provider that never announces its calls', async () => {
@@ -3504,7 +3602,7 @@ test('a subscription turn thinking past the idle timeout after a tool is not abo
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
     '---', 'name: Ava', 'provider: anthropic',
-    'tools:', '  - demo.echo', '---', '', 'You are Ava.', '',
+    'tools:', '  - memory.recall', '---', '', 'You are Ava.', '',
   ].join('\n'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
@@ -3525,11 +3623,11 @@ test('a subscription turn thinking past the idle timeout after a tool is not abo
     };
     return (async function* () {
       yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
-      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.memory_recall?.handler;
       if (!handler) {
         throw new Error('the tool was not bridged');
       }
-      await handler({ text: 'hi' }, {});
+      await handler({ query: 'hi' }, {});
       for (let report = 0; report < REPORTS; report += 1) {
         await new Promise((resolve) => setTimeout(resolve, (IDLE_MS * 2) / REPORTS));
         // A real query stops when its controller fires; without this the
@@ -3570,7 +3668,7 @@ test('a slow approval holds the watchdog even when the policy emits nothing', as
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
     '---', 'name: Ava', 'provider: anthropic',
-    'tools:', '  - demo.echo', '---', '', 'You are Ava.', '',
+    'tools:', '  - memory.recall', '---', '', 'You are Ava.', '',
   ].join('\n'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
@@ -3592,11 +3690,11 @@ test('a slow approval holds the watchdog even when the policy emits nothing', as
         session_id: 'sdk-1',
         event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'checking' } },
       };
-      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.memory_recall?.handler;
       if (!handler) {
         throw new Error('the tool was not bridged');
       }
-      await handler({ text: 'hi' }, {});
+      await handler({ query: 'hi' }, {});
       yield { type: 'result', subtype: 'success', is_error: false, result: 'all done', session_id: 'sdk-1' };
     })();
   }) as never;
@@ -3634,7 +3732,7 @@ test('a policy that throws does not leave the next turn without a watchdog', asy
   // is on neither the turn nor the path that caused it.
   const home = await newHome();
   const soul = path.join(home, '.stratus', 'agents', 'ava.md');
-  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
@@ -3645,7 +3743,7 @@ test('a policy that throws does not leave the next turn without a watchdog', asy
   );
 
   const IDLE_MS = 300;
-  const fetchImpl = (async () => openAiToolCall('demo_echo', { text: 'hi' })) as typeof fetch;
+  const fetchImpl = (async () => openAiToolCall('memory_recall', { query: 'hi' })) as typeof fetch;
   const queryFn = ((params: { options?: unknown }) => {
     const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
     return (async function* () {
@@ -3684,7 +3782,7 @@ test('a policy that throws does not leave the next turn without a watchdog', asy
   // The same agent switches to the subscription runtime, which streams —
   // the gateway re-reads the soul per dispatch, so this takes effect on
   // the next turn of the same session.
-  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
 
   const rescue = new AbortController();
   const timer = setTimeout(() => rescue.abort(), 10_000);
@@ -3787,7 +3885,7 @@ test('an approved tool on a turn with no watchdog leaves nothing behind', async 
   // the watchdog for the next turn on that session.
   const home = await newHome();
   const soul = path.join(home, '.stratus', 'agents', 'ava.md');
-  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
@@ -3801,7 +3899,7 @@ test('an approved tool on a turn with no watchdog leaves nothing behind', async 
   let openAiCalls = 0;
   const fetchImpl = (async () => {
     openAiCalls += 1;
-    return openAiCalls === 1 ? openAiToolCall('demo_echo', { text: 'hi' }) : openAiText('first done');
+    return openAiCalls === 1 ? openAiToolCall('memory_recall', { query: 'hi' }) : openAiText('first done');
   }) as typeof fetch;
 
   const queryFn = ((params: { options?: unknown }) => {
@@ -3838,7 +3936,7 @@ test('an approved tool on a turn with no watchdog leaves nothing behind', async 
   assert.equal(first.status, 'completed', `first turn failed: ${first.lastError ?? ''}`);
 
   // The same agent moves to the subscription runtime, which streams.
-  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
 
   const rescue = new AbortController();
   const timer = setTimeout(() => rescue.abort(), 10_000);
@@ -5419,6 +5517,7 @@ test('a keyed turn on a session switched for good to a stateless fallback is not
   const home = await newHome();
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    soul: path.join(home, '.stratus', 'agents', 'stratus.md'),
     provider: 'anthropic',
     model: 'model-p',
     fallbackModel: 'model-f',
@@ -6237,7 +6336,7 @@ test('an agent with its own budget gets it, and the rest keep the shared one', a
         return openAiText('wrapped up');
       }
       toolTurns.set(who, (toolTurns.get(who) ?? 0) + 1);
-      return openAiToolCall('demo.echo', { text: 'again' });
+      return openAiToolCall('memory.recall', { query: 'again' });
     }) as typeof fetch,
   };
   const gateway = createGateway({
@@ -6275,7 +6374,7 @@ test('an agent with auto-continue keeps working past its budget, up to its cap, 
         return openAiText('wrapped up');
       }
       toolTurns.set(who, (toolTurns.get(who) ?? 0) + 1);
-      return openAiToolCall('demo.echo', { text: 'again' });
+      return openAiToolCall('memory.recall', { query: 'again' });
     }) as typeof fetch,
   };
   const gateway = createGateway({
@@ -6318,7 +6417,7 @@ test('an auto-continuing turn wraps up when another message is waiting for its s
         return openAiText('answered');
       }
       toolTurns += 1;
-      return openAiToolCall('demo.echo', { text: 'again' });
+      return openAiToolCall('memory.recall', { query: 'again' });
     }) as typeof fetch,
   };
   const gateway = createGateway({

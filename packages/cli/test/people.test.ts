@@ -391,11 +391,12 @@ test('stratus people lists each agent\'s admit setting, people and approvers, an
   assert.match(result.stdout, /approvals\.mode is headless/);
 });
 
-test('stratus people lists the built-in agent too, which every daemon serves', async () => {
+test('stratus people lists only the agents that have souls: none lives in code', async () => {
   const { env } = await homeWith({ principals: { slackUsers: ['U01AAAAAA'] } });
   const result = await run(['people'], env);
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /^stratus\n {2}admits {5}listed people only\n {2}people {5}U01AAAAAA \(shared list\)\n {2}approvers {2}nobody$/m);
+  assert.match(result.stdout, /^ava\n {2}admits {5}listed people only\n {2}people {5}U01AAAAAA \(shared list\)\n {2}approvers {2}nobody$/m);
+  assert.doesNotMatch(result.stdout, /^stratus$/m);
 });
 
 test('stratus people says nobody is listed on a fresh home', async () => {

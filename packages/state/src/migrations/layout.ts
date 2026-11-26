@@ -13,7 +13,7 @@ import {
 } from '@stratusagent/permissions';
 import { type StateEnvironment } from '../environment.ts';
 import { memoryAppendNeedsNewline } from '../memory.ts';
-import { DEFAULT_STRATUS_AGENT } from '../souls.ts';
+import { LEGACY_DEFAULT_AGENT_ID } from '../souls.ts';
 import {
   agentMemoryFilePath,
   agentSessionDbPath,
@@ -263,7 +263,7 @@ export interface StateDirectoryNames {
 
 export const createStateDirectoryNames = (env: StateEnvironment): StateDirectoryNames => {
   const byName = new Map<string, string>([
-    [foldedAgentId(DEFAULT_STRATUS_AGENT.id), DEFAULT_STRATUS_AGENT.id],
+    [foldedAgentId(LEGACY_DEFAULT_AGENT_ID), LEGACY_DEFAULT_AGENT_ID],
   ]);
   // Once per tracker, on first use rather than at construction, because the
   // factory is called from synchronous places and most runs never ask.

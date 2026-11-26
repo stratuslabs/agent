@@ -1344,6 +1344,10 @@ test('update leaves the per-agent move pending when something still holds the ho
 
   assert.match(output.output.stderr, /is serving this home/);
   assert.match(output.output.stderr, /left pending/);
+  // Refused the home, it let go of its own lock too: doctor and health must
+  // not read a live daemon as an update.
+  const { fileLockHeld, updateLockPath } = await import('@stratusagent/state');
+  assert.equal(fileLockHeld(updateLockPath(env)), false);
   // The database is where it was, and the home still reads as un-migrated.
   await stat(legacySessionDbPath(env));
   assert.equal(await hasBracketedLegacyState(env), true);
@@ -1382,6 +1386,41 @@ test('update finishes the per-agent move when nothing else holds the home', asyn
   assert.equal(await hasBracketedLegacyState(env), false);
   const { claimHome } = await import('@stratusagent/gateway');
   claimHome(env).release();
+});
+
+test('update holds its own lock for as long as it holds the home, so readers can tell it from a daemon', async () => {
+  // The home lock alone says only that something has the home: a daemon,
+  // or this command migrating it with the daemon stopped. Doctor and health
+  // tell those apart by the update lock, so it is taken before the home and
+  // let go after it.
+  const home = await freshHome();
+  const { fileLockHeld, updateLockPath } = await import('@stratusagent/state');
+  const gateway = await import('@stratusagent/gateway');
+  const seen: string[] = [];
+  const env = {
+    homeDir: home,
+    cwd: home,
+    processEnv: {},
+    serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
+    packageVersionFetcher: async () => CLI_VERSION,
+    gatewayLoader: async () => ({
+      ...gateway,
+      claimHome: (claimEnv: Parameters<typeof gateway.claimHome>[0]) => {
+        seen.push(`claim: update lock ${fileLockHeld(updateLockPath(claimEnv))}`);
+        const claim = gateway.claimHome(claimEnv);
+        return {
+          release: () => {
+            seen.push(`release: update lock ${fileLockHeld(updateLockPath(claimEnv))}`);
+            claim.release();
+          },
+        };
+      },
+    }),
+  };
+  const output = createStreams();
+  assert.equal(await runCli({ argv: ['update'], streams: output.streams, env }), 0, output.output.stderr);
+  assert.deepEqual(seen.slice(0, 2), ['claim: update lock true', 'release: update lock true']);
+  assert.equal(fileLockHeld(updateLockPath(env)), false);
 });
 
 test('an upgraded CLI hands the migrations to the new build instead of running them itself', async () => {

@@ -21,12 +21,11 @@ const homeWithConfiguredSoul = async (id: string): Promise<{ home: string; soul:
   return { home, soul };
 };
 
-const rosterOf = async (home: string, includeBuiltIn: boolean) => {
+const rosterOf = async (home: string) => {
   const warnings: string[] = [];
   const roster = await rosterSoulsWithConfigured(
     { homeDir: home, cwd: home, processEnv: {} },
     (line) => warnings.push(line),
-    { includeBuiltIn },
   );
   return {
     ids: roster.entries.map((entry) => entry.soul.agent.id),
@@ -37,52 +36,43 @@ const rosterOf = async (home: string, includeBuiltIn: boolean) => {
 };
 
 // The gateway drops a configured default soul whose id names another
-// registered agent's state directory without being that id (`Stratus`
-// beside the built-in, `Remy` beside roster `remy`) and routes to the
-// built-in. The CLI answers for the same roster, or `signin set`, `channel
-// set`, `skills` and `plugins` describe an agent the daemon never serves.
-for (const includeBuiltIn of [false, true]) {
-  test(`rosterSoulsWithConfigured leaves off a configured soul whose id folds onto another (includeBuiltIn: ${includeBuiltIn})`, async () => {
-    const ontoBuiltIn = await homeWithConfiguredSoul('Stratus');
-    const builtIn = await rosterOf(ontoBuiltIn.home, includeBuiltIn);
-    assert.deepEqual(builtIn.ids, includeBuiltIn ? ['stratus', 'remy'] : ['remy']);
-    assert.equal(builtIn.complete, true);
-    assert.ok(
-      builtIn.warnings.some((line) => line.includes(ontoBuiltIn.soul) && /declares the agent id Stratus, which names the same state directory as stratus/.test(line)),
-      builtIn.warnings.join('\n'),
-    );
+// registered agent's state directory without being that id (`Remy` beside
+// roster `remy`), and turns that name no agent then have no default. The CLI
+// answers for the same roster, or `signin set`, `channel set`, `skills` and
+// `plugins` describe an agent the daemon never serves.
+test('rosterSoulsWithConfigured leaves off a configured soul whose id folds onto another', async () => {
+  const ontoRoster = await homeWithConfiguredSoul('Remy');
+  const roster = await rosterOf(ontoRoster.home);
+  assert.deepEqual(roster.ids, ['remy']);
+  assert.equal(roster.complete, true);
+  // The roster soul keeps serving from its own file.
+  assert.equal(roster.paths.at(-1), path.join(ontoRoster.home, '.stratus', 'agents', 'remy.md'));
+  assert.ok(
+    roster.warnings.some((line) => line.includes(ontoRoster.soul) && /declares the agent id Remy, which names the same state directory as remy/.test(line)),
+    roster.warnings.join('\n'),
+  );
+});
 
-    const ontoRoster = await homeWithConfiguredSoul('Remy');
-    const roster = await rosterOf(ontoRoster.home, includeBuiltIn);
-    assert.deepEqual(roster.ids, includeBuiltIn ? ['stratus', 'remy'] : ['remy']);
-    // The roster soul keeps serving from its own file.
-    assert.equal(roster.paths.at(-1), path.join(ontoRoster.home, '.stratus', 'agents', 'remy.md'));
-    assert.ok(
-      roster.warnings.some((line) => /declares the agent id Remy, which names the same state directory as remy/.test(line)),
-      roster.warnings.join('\n'),
-    );
-  });
+test('rosterSoulsWithConfigured lists a configured soul first, and an exact id takes the roster file over', async () => {
+  // No id is held back for an agent in code: a configured `Stratus` is an
+  // agent like any other, listed first as the default.
+  const stratus = await homeWithConfiguredSoul('Stratus');
+  const listed = await rosterOf(stratus.home);
+  assert.deepEqual(listed.ids, ['Stratus', 'remy']);
+  assert.equal(listed.paths[0], stratus.soul);
+  assert.deepEqual(listed.warnings, []);
 
-  test(`rosterSoulsWithConfigured still takes an exact id over (includeBuiltIn: ${includeBuiltIn})`, async () => {
-    // Exactly `stratus` is the configured soul taking the reserved id over,
-    // and exactly `remy` is the configured soul replacing the roster file:
-    // the daemon serves both, so neither is a collision.
-    const reserved = await homeWithConfiguredSoul('stratus');
-    const taken = await rosterOf(reserved.home, includeBuiltIn);
-    assert.deepEqual(taken.ids, includeBuiltIn ? ['stratus', 'remy'] : ['remy', 'stratus']);
-    assert.ok(taken.paths.includes(reserved.soul));
-    assert.deepEqual(taken.warnings, []);
-
-    const same = await homeWithConfiguredSoul('remy');
-    const replaced = await rosterOf(same.home, includeBuiltIn);
-    assert.deepEqual(replaced.ids, includeBuiltIn ? ['stratus', 'remy'] : ['remy']);
-    assert.equal(replaced.paths.at(-1), same.soul);
-    assert.deepEqual(replaced.warnings, []);
-  });
-}
+  // Exactly `remy` is the configured soul replacing the roster file: the
+  // daemon serves it, so it is not a collision.
+  const same = await homeWithConfiguredSoul('remy');
+  const replaced = await rosterOf(same.home);
+  assert.deepEqual(replaced.ids, ['remy']);
+  assert.equal(replaced.paths.at(-1), same.soul);
+  assert.deepEqual(replaced.warnings, []);
+});
 
 test('stratus channel set refuses a configured soul the daemon ignores for folding onto another id, and says why', async () => {
-  const { home } = await homeWithConfiguredSoul('Stratus');
+  const { home } = await homeWithConfiguredSoul('Remy');
   const env = { homeDir: home, cwd: home, processEnv: {} };
   let stdout = '';
   let stderr = '';
@@ -91,13 +81,13 @@ test('stratus channel set refuses a configured soul the daemon ignores for foldi
     stderr: { write(chunk: string) { stderr += chunk; return true; } },
   };
   const code = await runCli({
-    argv: ['channel', 'set', 'imessage', '--agent', 'Stratus', 'apiKey'],
+    argv: ['channel', 'set', 'imessage', '--agent', 'Remy', 'apiKey'],
     streams,
     env: { ...env, stdin: 'synthetic-key\n' },
   });
   assert.equal(code, 1, stdout);
-  assert.match(stderr, /No agent Stratus is on the roster/);
-  assert.match(stderr, /names the same state directory as stratus/);
+  assert.match(stderr, /No agent Remy is on the roster/);
+  assert.match(stderr, /names the same state directory as remy/);
   const credentials = await readFile(path.join(home, '.stratus', 'credentials.json'), 'utf8').catch(() => '');
   assert.ok(!credentials.includes('synthetic-key'), 'nothing stored');
 });

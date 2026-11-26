@@ -23,7 +23,7 @@ import {
 } from './provider-names.ts';
 import { type SoulPinContext, applySoulPins } from './served.ts';
 import { signedInProviders } from './runtime.ts';
-import { DEFAULT_STRATUS_AGENT, EVERY_TOOL, resolveConfiguredSoul, loadRosterSouls } from './souls.ts';
+import { EVERY_TOOL, resolveConfiguredSoul, loadRosterSouls } from './souls.ts';
 
 // ---------------------------------------------------------------------------
 // Creating a soul under an id nothing else holds
@@ -43,8 +43,6 @@ import { DEFAULT_STRATUS_AGENT, EVERY_TOOL, resolveConfiguredSoul, loadRosterSou
  *   path differs — so a new agent sharing its id is not refused, it is
  *   shadowed: created, then undispatchable by id or from Slack, with
  *   nothing saying so.
- * - **The reserved `stratus`**, since a roster soul claiming it is skipped
- *   at load, so writing one creates an agent that silently never appears.
  *
  * The two readable sources fail **independently**, and what they return is
  * what they know rather than all-or-nothing. A configured soul that is
@@ -96,7 +94,7 @@ export const declaredAgentIds = async (
     resolveConfiguredSoul(configPath ? { configPath } : {}, env),
   ]);
 
-  const ids = new Set([foldedAgentId(DEFAULT_STRATUS_AGENT.id)]);
+  const ids = new Set<string>();
   const unread: string[] = [];
   if (roster.status === 'fulfilled') {
     for (const entry of roster.value) {
@@ -206,7 +204,10 @@ export interface AgentSummary {
   name: string;
   /** The agent an agentId-less run or dispatch answers as. */
   default: boolean;
-  /** The built-in Stratus persona, which has no soul file. */
+  /**
+   * Always false. No agent is defined in code any more, so every agent
+   * has a soul file; kept so readers built against it still get a boolean.
+   */
   builtIn: boolean;
   soulPath?: string;
   /** The soul's own frontmatter pin, verbatim. Absent when it pins nothing. */
@@ -358,24 +359,9 @@ export const listAgentSummaries = async (
     await addSoul(resolvedDefaultSoul);
   }
 
-  // The built-in Stratus persona serves every run that has no soul.
-  const builtInPersona = personaSnippet(DEFAULT_STRATUS_AGENT.instructions);
-  summaries.push({
-    id: DEFAULT_STRATUS_AGENT.id,
-    name: DEFAULT_STRATUS_AGENT.name,
-    default: resolvedDefaultSoul === undefined,
-    builtIn: true,
-    runsOn: runsOnFor(),
-    memories: (await memory.list(DEFAULT_STRATUS_AGENT.id)).entries.length,
-    ...(builtInPersona ? { persona: builtInPersona } : {}),
-  });
-
   summaries.sort((a, b) => {
     if (a.default !== b.default) {
       return a.default ? -1 : 1;
-    }
-    if (a.builtIn !== b.builtIn) {
-      return a.builtIn ? 1 : -1;
     }
     return a.name.localeCompare(b.name);
   });

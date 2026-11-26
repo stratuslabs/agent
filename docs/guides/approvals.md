@@ -283,7 +283,8 @@ page and you have asked for that to cost it its grants; see
 
 A tool that declares no risk counts as `gated`, never `safe` — forgetting
 to classify something should cost a prompt, not an unattended command. Most
-built-in tools (`demo.echo`, `memory.remember`, `memory.recall`,
+built-in tools (`demo.echo`, which only an agent on the demo provider is
+given, `memory.remember`, `memory.recall`,
 `memory.forget`, `agent.delegate`, `credential.request`, `schedule.list`,
 `schedule.cancel`) are `safe`; the built-in exceptions are `schedule.every`,
 `schedule.at`, `schedule.on` and `message.send`, which are `gated` because

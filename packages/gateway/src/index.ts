@@ -232,6 +232,7 @@ import {
   BUILTIN_MEMORY_STORE_NAME,
   BUILTIN_PROVIDER_NAMES,
   createDemoTool,
+  toolsForRuntime,
   createFileCredentialResolver,
   credentialValuesFor,
   resolveDaemonCredential,
@@ -241,7 +242,6 @@ import {
   hasBracketedLegacyStateIn,
   createRuntimeProvider,
   describeServingModel,
-  DEFAULT_STRATUS_AGENT,
   isRegisteredProviderName,
   loadChannelTransportSecrets,
   registeredProviderNameOf,
@@ -254,7 +254,8 @@ import {
   PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
   loadConfigFile,
-  resolveConfigLocation,
+  discoverConfigLocation,
+  type SkippedConfigFile,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   runsOnHarness,
@@ -743,11 +744,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   /**
    * The agent an agentId-less dispatch routes to: the configured default
    * soul when one is set (what `stratus setup` writes to config.json),
-   * the built-in Stratus definition otherwise. Re-resolved per call so an
+   * and none otherwise: no agent is defined in code to fall back on, so
+   * such a turn fails saying how to make one. Re-resolved per call so an
    * edited default soul reaches conversations without a restart — the
    * runtime config already re-reads it, and the identity (persona, tool
-   * allowlist, memory id) must follow along, not stay pinned to the
-   * built-in definition.
+   * allowlist, memory id) must follow along.
    */
   let lastDefaultAgentId: string | undefined;
   /**
@@ -760,6 +761,35 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The last successfully loaded config snapshot, serving dispatches while
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
+  // The last project config discovery passed over, said once per new
+  // reason rather than on every dispatch.
+  let lastSkippedConfig: string | undefined;
+  /**
+   * The config a dispatch resolves from, read once. A project config in the
+   * daemon's folder that won't load is skipped for the global one, so a
+   * broken untrusted file is never the reason nothing dispatches. One the
+   * daemon was running on is an operator mid-edit, though: that throws the
+   * ConfigFileError the last-known-good paths handle, so neither the
+   * runtime nor the default agent moves to another file's settings. Each
+   * caller resolves from the snapshot this returns rather than discovering
+   * again, which a save landing in between could send to a different file.
+   */
+  const dispatchConfigSnapshot = async (): Promise<{
+    snapshot: NonNullable<RuntimeSelection['presetConfig']>;
+    skipped?: SkippedConfigFile;
+  }> => {
+    const { location, skipped } = await discoverConfigLocation(
+      options.selection?.configPath ? { configPath: options.selection.configPath } : {},
+      env,
+    );
+    if (skipped !== undefined && lastGoodConfigSnapshot?.path === skipped.path) {
+      throw new ConfigFileError(skipped.path, new Error(skipped.reason));
+    }
+    const snapshot = location
+      ? { config: await loadConfigFile(location.path), trusted: location.trusted, path: location.path }
+      : { config: {}, trusted: true };
+    return skipped !== undefined ? { snapshot, skipped } : { snapshot };
+  };
   /**
    * Read from the home once, on first use, which is after the migrations
    * `serve` runs before it starts the gateway. It changes only when 0005
@@ -773,8 +803,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * agent whose soul never wrote the key cannot run a shell, write a file
    * or send a message, and nothing else says why. On a home an older build
    * set up it is every tool, as it always was there, and the line says so
-   * the way it always did. The built-in agent is exempt: it has no file,
-   * and says `tools: ["*"]` in code.
+   * the way it always did.
    */
   const warnNoToolsList = (agentId: string, soulPath: string): void => {
     warn(unlistedTools() === 'every'
@@ -784,7 +813,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
         + `add tools: [...] to ${soulPath} to give it more, or tools: ["*"] for every tool`);
   };
 
-  const defaultAgentId = async (): Promise<string> => {
+  const defaultAgentId = async (): Promise<string | undefined> => {
     // Identity only — never full runtime resolution: credential checks do
     // not belong here, or a daemon default provider without installed keys
     // would throw while the soul pins a provider that has them, taking
@@ -792,46 +821,47 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // happens at dispatch, where pin demotion applies.
     let resolved: { soul: ParsedSoul; path: string } | undefined;
     try {
-      resolved = await resolveConfiguredSoul({ ...options.selection }, env);
+      const { snapshot } = await dispatchConfigSnapshot();
+      resolved = await resolveConfiguredSoul({ ...options.selection, presetConfig: snapshot }, env);
     } catch (error) {
       warn(`could not load the configured default soul: ${error instanceof Error ? error.message : String(error)}`);
       // A transiently unreadable default keeps routing to the last known
       // default agent (whose source serves from cache) rather than
-      // silently switching identities to the built-in.
-      return lastDefaultAgentId ?? DEFAULT_STRATUS_AGENT.id;
+      // failing turns that were reaching it a moment ago.
+      return lastDefaultAgentId;
     }
     if (!resolved) {
-      // The operator removed the default soul on purpose: the built-in is
+      // The operator removed the default soul on purpose: no default is
       // now the cached answer too, so a later transient read failure
       // cannot resurrect the retired soul's identity.
-      lastDefaultAgentId = DEFAULT_STRATUS_AGENT.id;
+      lastDefaultAgentId = undefined;
       lastDefaultResolved = undefined;
-      return DEFAULT_STRATUS_AGENT.id;
+      return undefined;
     }
     const id = resolved.soul.agent.id;
     // The roster refuses two *souls* whose ids name one state directory,
     // but this soul never went through it: a config-only default is
     // resolved here, by path, and registered by exact id. So `Ava` in
-    // config beside `ava` on the roster — or `Stratus` beside the built-in
-    // — passed as two agents sharing one `agents/<id>/`, which is one
+    // config beside `ava` on the roster passed as two agents sharing one
+    // `agents/<id>/`, which is one
     // `whitelist.json` and therefore one agent acting on the other's
     // unattended grants.
     //
     // Warned and dropped rather than thrown: this runs on every
     // agentId-less dispatch, and a configuration mistake must not turn
-    // every such turn into an error. Dropping routes to the built-in,
-    // which is the documented answer when there is no usable default, and
-    // leaves the colliding agent serving from its own directory alone.
+    // every turn that names its agent into an error too. Dropped, it is no
+    // default, which is the documented answer when there is no usable one,
+    // and leaves the colliding agent serving from its own directory alone.
     const peer = stateDirectoryPeer(id);
     if (peer !== undefined) {
       warn(
         `the configured default soul at ${resolved.path} declares the agent id ${id}, which names the same `
         + `state directory as ${peer} — sessions, memories, and the grants that say what may run unattended. `
-        + `Ignoring it and routing to ${DEFAULT_STRATUS_AGENT.id}; rename one of the two ids.`,
+        + 'Ignoring it, so turns that name no agent fail until you rename one of the two ids.',
       );
-      lastDefaultAgentId = DEFAULT_STRATUS_AGENT.id;
+      lastDefaultAgentId = undefined;
       lastDefaultResolved = undefined;
-      return DEFAULT_STRATUS_AGENT.id;
+      return undefined;
     }
     lastDefaultResolved = resolved;
     // The normal setup layout has the default soul in ~/.stratus/agents
@@ -870,13 +900,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       seen.add(source.definition.id);
     };
 
-    // The built-in id is reserved BEFORE ordinary roster entries load: a
-    // roster file that happens to declare id "stratus" must not hijack
-    // the documented built-in fallback for agentId-less dispatches — the
-    // guard below skips it with a warning. Only the explicitly
-    // configured default soul may take the id over (defaultAgentId
-    // replaces a pathless source).
-    registerFresh({ definition: { ...DEFAULT_STRATUS_AGENT } });
     // Throws on two roster files claiming one id: that is a collision with
     // no correct winner, and refusing to serve beats letting sort order
     // decide whose sessions, memory, and credentials an agent inherits.
@@ -885,17 +908,6 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // configured default is not named twice when it is one of them.
     const namedThisPass = new Set<string>();
     for (const entry of entries) {
-      // Against ids claimed by THIS pass, not by any earlier one: a reload
-      // must be free to re-register the agent it just re-read, and only the
-      // built-in above can legitimately block a roster file.
-      if (seen.has(entry.soul.agent.id)) {
-        // Only reachable for the reserved built-in id now — roster-vs-
-        // roster duplicates never get this far. Reserved is not the same
-        // failure as duplicated: a soul may not take the fallback over,
-        // and must not be able to take the daemon down by trying.
-        warn(`agent id ${entry.soul.agent.id} is reserved for the built-in agent; ignoring ${entry.path}`);
-        continue;
-      }
       registerFresh({ definition: entry.soul.agent, soulPath: entry.path, soul: entry.soul });
       if (entry.soul.agent.tools === undefined) {
         warnNoToolsList(entry.soul.agent.id, entry.path);
@@ -907,17 +919,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // directory, and it survives a read failure by name, so what it
     // resolves to is kept whether or not this pass re-registered it.
     const defaultId = await defaultAgentId();
-    seen.add(defaultId);
+    if (defaultId !== undefined) {
+      seen.add(defaultId);
+    }
     // The same notice for a default soul that lives outside the agents
     // directory — the one path into the roster that skips the loop above
     // — on every load, judged on what the resolution just read rather
     // than on the registered source, so a key removed after startup is
     // reported at the next reload. A roster-backed default was named by
     // the loop, and is not named twice.
-    if (lastDefaultResolved !== undefined
+    if (defaultId !== undefined
+      && lastDefaultResolved !== undefined
       && lastDefaultResolved.soul.agent.tools === undefined
       && !namedThisPass.has(lastDefaultResolved.path)) {
       warnNoToolsList(defaultId, lastDefaultResolved.path);
+    }
+    // Once per load, so a daemon started before anyone made an agent says
+    // why every turn it is handed fails.
+    if (seen.size === 0) {
+      warn('no agents yet: create one with `stratus setup` or `stratus agent new`, and turns have someone to answer them');
     }
 
     for (const id of [...sources.keys()]) {
@@ -1148,8 +1168,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * `soulReloads` is true because `refreshAgent` re-reads the file on every
    * dispatch. A refresh that failed serves from cache and carries no path,
    * so the agent is told nothing about a soul file for that turn rather
-   * than something the daemon could not just read. The built-in agent has
-   * no file, so it is told only where its workspace is.
+   * than something the daemon could not just read. An agent registered
+   * with no file is told only where its workspace is.
    *
    * The language and the model come from the config this same dispatch
    * resolved for that source, for the same reason: the turn runs on it.
@@ -1630,7 +1650,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     const runner = new AgentRunner({
       provider,
-      tools,
+      // demo.echo only for the demo provider, which is what calls it. The
+      // key above holds the provider, so a demo runner is never shared.
+      tools: toolsForRuntime(tools, config),
       // Runners are built on dispatch, after the plugins loaded and the
       // selection below ran, so a contributed executor is in place for
       // the first turn.
@@ -2234,15 +2256,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // in a real conversation. With no known-good snapshot to fall back
     // on, failing is the honest outcome. Credential and provider errors
     // are never masked — only the file itself degrades.
+    // A project config that won't load: see dispatchConfigSnapshot.
     let configSnapshot: NonNullable<RuntimeSelection['presetConfig']>;
     try {
-      const location = await resolveConfigLocation(
-        options.selection?.configPath ? { configPath: options.selection.configPath } : {},
-        env,
-      );
-      configSnapshot = location
-        ? { config: await loadConfigFile(location.path), trusted: location.trusted, path: location.path }
-        : { config: {}, trusted: true };
+      const { snapshot, skipped } = await dispatchConfigSnapshot();
+      const skippedLine = skipped === undefined
+        ? undefined
+        : `ignoring ${skipped.path}, which can't be used (${skipped.reason}); serving on ${snapshot.path ?? 'built-in defaults'}`;
+      if (skippedLine !== undefined && skippedLine !== lastSkippedConfig) {
+        warn(skippedLine);
+      }
+      lastSkippedConfig = skippedLine;
+      configSnapshot = snapshot;
       lastGoodConfigSnapshot = configSnapshot;
     } catch (error) {
       if (!(error instanceof ConfigFileError) || !lastGoodConfigSnapshot) {
@@ -2267,10 +2292,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       });
       resolveEnv = normalized.env;
     } else {
-      // A soul-less agent (the built-in default) resolves with no soul at
-      // all: the config file's default soul belongs to another identity —
-      // and when the default route degrades to the built-in, it is exactly
-      // because that file is currently unusable.
+      // An agent with no soul file resolves with no soul at all: the
+      // config file's default soul belongs to another identity.
       selection.presetSoul = null;
     }
 
@@ -3061,7 +3084,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       log(`intake is paused (since ${intakeState.since ?? 'unknown'}); new work will be refused until it resumes`);
     }
     const named = registry.list().map((agent) => agent.name).join(', ');
-    log(`stratusd ready — ${registry.list().length} agent(s): ${named}`);
+    log(named ? `stratusd ready — ${registry.list().length} agent(s): ${named}` : 'stratusd ready — no agents yet');
     log(backgroundTasks.summary);
     {
       // Said at every start: a limit that stops turns should never be a

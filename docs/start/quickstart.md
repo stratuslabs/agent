@@ -1,8 +1,17 @@
 # Quickstart
 
 The fastest paths from an installed CLI to something answering. If you ran
-[`stratus setup`](./setup.md), `stratus chat` already works; the paths below
-need no setup at all, or show every setting spelled out.
+[`stratus setup`](./setup.md), `stratus chat` already works: setup made your
+first agent. The paths below need no setup at all, or show every setting
+spelled out.
+
+No agent is defined in code, so without setup the first step is one. Print a
+soul to a file and point the CLI at it; every command below then runs as it:
+
+```bash
+stratus agent new --name Stratus --format soul > stratus.md
+export STRATUS_SOUL="$PWD/stratus.md"
+```
 
 ## 1) Run the demo path — no account needed
 

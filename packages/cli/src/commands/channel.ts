@@ -88,7 +88,7 @@ export const runChannel = async (
   // roster loaded: a soul that fails to parse is a reason to fix the soul,
   // not to refuse the secret.
   const warnings: string[] = [];
-  const roster = await rosterSoulsWithConfigured(env, (line) => warnings.push(line), { includeBuiltIn: true });
+  const roster = await rosterSoulsWithConfigured(env, (line) => warnings.push(line));
   if (roster.complete && !roster.entries.some((entry) => entry.soul.agent.id === agentId)) {
     writeLine(streams.stderr, `No agent ${agentId} is on the roster, so a ${kind} binding for it would never come online. \`stratus agents\` lists who is.`);
     // Why it is not there, when the roster said: a configured soul the

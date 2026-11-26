@@ -1,5 +1,5 @@
 import { matchesToolAllowlist, toolScopesOverlap, type ToolRisk, type UnlistedTools } from '@stratusagent/core';
-import { DEFAULT_STRATUS_AGENT, foldedAgentId, loadRosterSouls, resolveConfiguredSoul } from '@stratusagent/state';
+import { foldedAgentId, loadRosterSouls, resolveConfiguredSoul } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
 
 /**
@@ -63,45 +63,27 @@ export const rosterSoulsWithConfigured = async (
      * serve.
      */
     configPath?: string;
-    /**
-     * Seed the reserved built-in agent, the way `loadRoster` does. It is
-     * granted every registered tool (`tools: ["*"]` in code) — and on a
-     * fresh install it is the only agent there is, which made "granted to
-     * nobody" exactly backwards for the most common configuration of all.
-     * Off by default: a caller reporting on souls should not have one
-     * appear that has no file.
-     */
-    includeBuiltIn?: boolean;
   } = {},
 ): Promise<{ entries: Awaited<ReturnType<typeof loadRosterSouls>>; complete: boolean }> => {
-  const { configPath, includeBuiltIn = false } = options;
-  // Before the roster, exactly as the gateway registers it: a roster file
-  // claiming the reserved id is dropped by `loadRosterSouls`, and only the
-  // configured default soul may take it over — which the replace below
-  // does on id, so nothing extra is needed for that case.
-  const entries = includeBuiltIn
-    ? [{ soul: { agent: { ...DEFAULT_STRATUS_AGENT } } } as Awaited<ReturnType<typeof loadRosterSouls>>[number],
-      ...await loadRosterSouls(env, warn)]
-    : await loadRosterSouls(env, warn);
+  const { configPath } = options;
+  const entries = await loadRosterSouls(env, warn);
   let complete = true;
   try {
     const configured = await resolveConfiguredSoul(configPath !== undefined ? { configPath } : {}, env);
     // The gateway's rule for a default soul that never went through the
     // roster's fold check (stateDirectoryPeer in defaultAgentId): an id
     // that names another agent's state directory without being that id,
-    // `Stratus` beside the built-in or `Ava` beside roster `ava`, is
-    // dropped and default dispatches go to the built-in. The built-in is
-    // always registered there, so it is folded against here whether or not
-    // the caller lists it.
+    // `Ava` beside roster `ava`, is dropped, and turns that name no agent
+    // have no default.
     const id = configured?.soul.agent.id;
     const peer = id === undefined
       ? undefined
-      : [DEFAULT_STRATUS_AGENT.id, ...entries.map((candidate) => candidate.soul.agent.id)]
+      : entries.map((candidate) => candidate.soul.agent.id)
         .find((other) => other !== id && foldedAgentId(other) === foldedAgentId(id));
     if (configured && peer !== undefined) {
       warn(
         `the configured default soul at ${configured.path} declares the agent id ${id}, which names the same `
-        + `state directory as ${peer}, so the daemon ignores it and routes to ${DEFAULT_STRATUS_AGENT.id}. `
+        + `state directory as ${peer}, so the daemon ignores it and turns that name no agent fail. `
         + 'Rename one of the two ids.',
       );
     } else if (configured) {
@@ -113,7 +95,8 @@ export const rosterSoulsWithConfigured = async (
       if (clash >= 0) {
         entries[clash] = entry;
       } else {
-        entries.push(entry);
+        // First, as the agent a turn that names none reaches.
+        entries.unshift(entry);
       }
     }
   } catch (error) {

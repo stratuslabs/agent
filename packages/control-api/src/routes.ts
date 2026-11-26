@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AgentGrantStore } from '@stratusagent/permissions';
 import type { Gateway } from '@stratusagent/gateway';
-import { DEFAULT_STRATUS_AGENT, type StateEnvironment } from '@stratusagent/state';
+import { type StateEnvironment } from '@stratusagent/state';
 
 import type { Principal } from './auth.ts';
 import type { CredentialLinkStore } from './credential-links.ts';
@@ -152,4 +152,3 @@ export const resolveRoute = (
 export const allowedMethodsFor = (pathname: string): string[] =>
   routes.filter((route) => matchPath(route.pattern, pathname)).map((route) => route.method);
 
-export const BUILT_IN_AGENT_ID = DEFAULT_STRATUS_AGENT.id;

@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { claimFileLock, FileLockHeldError, grantReadSerializer, grantsLockPath, grantWriteSerializer } from '../src/index.ts';
+import { claimFileLock, fileLockHeld, FileLockHeldError, grantReadSerializer, grantsLockPath, grantWriteSerializer } from '../src/index.ts';
 
 const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-file-lock-'));
 
@@ -119,4 +119,57 @@ test('a grant read or write whose lock is still held after the wait is refused, 
     holder.release();
   }
   assert.equal(ran, false);
+});
+
+test('asking whether a lock is held answers without taking it or creating the file', async () => {
+  const lockPath = path.join(await newHome(), '.stratus', 'stratusd.lock');
+  // No file: nobody holds it, and asking made nothing.
+  assert.equal(fileLockHeld(lockPath), false);
+  await assert.rejects(access(lockPath), { code: 'ENOENT' });
+  await assert.rejects(access(path.dirname(lockPath)), { code: 'ENOENT' });
+
+  const held = claimFileLock(lockPath);
+  assert.equal(fileLockHeld(lockPath), true);
+  // Asking twice changes nothing for the holder or the next claimant.
+  assert.equal(fileLockHeld(lockPath), true);
+  held.release();
+  assert.equal(fileLockHeld(lockPath), false);
+  // Asking left nothing behind that stops a claim.
+  claimFileLock(lockPath).release();
+
+  // Something else at the path, never a holder.
+  await writeFile(lockPath, 'not a database at all, and longer than a header would be: '.repeat(4));
+  assert.equal(fileLockHeld(lockPath), false);
+  const link = path.join(path.dirname(lockPath), 'linked.lock');
+  await symlink(lockPath, link);
+  assert.equal(fileLockHeld(link), false);
+
+  // There, but not ours to read: no holder seen is not no holder.
+  await writeFile(lockPath, '');
+  await chmod(lockPath, 0o000);
+  try {
+    assert.equal(fileLockHeld(lockPath), process.getuid?.() === 0 ? false : undefined);
+  } finally {
+    await chmod(lockPath, 0o600);
+  }
+});
+
+test('a lock another process holds reads as held, and free once that process lets go', async () => {
+  // The case doctor and health ask about: the daemon is another process.
+  const lockPath = path.join(await newHome(), '.stratus', 'stratusd.lock');
+  claimFileLock(lockPath).release();
+  const holder = spawn(process.execPath, ['--no-warnings', '-e', `
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(${JSON.stringify(lockPath)});
+    db.exec('PRAGMA journal_mode = MEMORY');
+    db.exec('BEGIN EXCLUSIVE');
+    process.stdout.write('held\\n');
+    process.stdin.once('data', () => { db.close(); process.exit(0); });
+  `], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const [chunk] = await once(holder.stdout!, 'data') as [Buffer];
+  assert.equal(chunk.toString().trim(), 'held');
+  assert.equal(fileLockHeld(lockPath), true);
+  holder.stdin!.write('go\n');
+  await once(holder, 'exit');
+  assert.equal(fileLockHeld(lockPath), false);
 });

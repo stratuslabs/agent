@@ -28,6 +28,39 @@ Stratus agents are designed to work like a teammate, not a stateless bot:
   a message) to the right agent, so the same person consistently answers in
   the same places.
 
+## Your first agent
+
+No agent is defined in code: every agent is a soul file you can read and
+edit. `stratus setup` makes your first one if there is none (it asks for a
+name; Enter keeps Stratus) and sets it as the default, the agent a turn
+reaches when it names none. `stratus agent new` makes one too, and offers to
+make it the default.
+
+Until there is one, `stratus run` and `stratus chat` exit saying how to make
+one, and a daemon starts but fails each turn with the same advice
+(`stratus doctor` says so too). A daemon that started before you made one
+keeps serving nobody until it reloads, so restart it (`stratus restart`).
+On a server or container with fresh state, run `stratus setup` or
+`stratus agent new` once, or mount a soul into `~/.stratus/agents`.
+
+Releases before this one served a built-in `stratus` agent from code. An
+install that used it (conversations, memory, a schedule, a Slack app or
+other channel binding, grants, or people, approver or Slack settings under
+`stratus` in its config) gets a `stratus.md` soul written after the upgrade,
+with the same persona and every tool. It becomes the default in your config
+when that has none, and also in the file `STRATUS_CONFIG` names, if you set
+one. Its conversations, memory, schedules, grants and Slack app carry on
+under the same id. The upgrade never overwrites a file:
+if `stratus.md` is another agent's, the soul is written as
+`stratus-agent.md`. It writes nothing when a soul already declares
+`stratus`. A soul whose id differs only in case (`Stratus`) is not taken
+for it, and the upgrade writes nothing beside it either; its start-up note
+says to change that soul's id to `stratus` to keep the old conversations and
+memory. An install that never used it gets nothing, and the agent is simply
+gone from its roster. That last check waits for the daemon's first start on
+the new release, or `stratus update`, so an older daemon still running can't
+start using `stratus` after it was made.
+
 ## Creating an agent
 
 One call — or one command. If you don't name them, we will, and every agent
@@ -71,7 +104,6 @@ name: Blair
 provider: anthropic
 model: claude-opus-5-5
 tools:
-  - demo.echo
   - memory.*
 skills:
   - code-review
@@ -112,8 +144,8 @@ carries on with work it was already asked to do instead of asking
 permission for each step, and asks only the questions it cannot go on
 without, all at once, while it keeps doing what does not depend on them.
 
-The same section holds every agent to grounded claims, because a custom
-soul replaces the default persona and these must not go with it. It never
+The same section holds every agent to grounded claims, because every agent's persona comes from its soul, and a persona must not
+be able to drop these. It never
 invents a feature, a number, evidence, a customer fact, an experience, or
 work it did not do; it keeps proposals apart from facts and says exactly how
 far something got (drafted, saved, tested, sent, deployed, and verified are
@@ -138,8 +170,8 @@ file it was loaded from (named by its real path), that the file's contents
 are already in its instructions so there is nothing to open or reread, and
 where its workspace is. Under `stratus serve` it is also told that the
 daemon reads the soul again before every turn, so an edit reaches its next
-reply; `stratus run` reads it once and makes no such promise. The built-in
-agent has no soul file and hears only about its workspace. Without this, an
+reply; `stratus run` reads it once and makes no such promise. An agent defined in code, with no soul file, hears only about its
+workspace. Without this, an
 agent asked to reread an edited soul went looking for a `SOUL.md` in its
 workspace, the convention of other runtimes, and concluded it had none.
 
@@ -213,8 +245,10 @@ stratus agent new --format soul > my-agent.md   # generated identity, ready to e
 
 Two well-written example souls live in
 [`examples/souls/`](../../examples/souls) — they double as the format docs.
-A soul's provider/model are hints:
+A soul's provider/model are hints for a run:
 [`--provider`/`--model` flags and `STRATUS_*` env vars still win](../reference/config.md).
+Under `stratus serve` each pin wins instead, and `STRATUS_PROVIDER` and
+`STRATUS_MODEL` are only the default for what a soul doesn't pin.
 `provider:` may name a built-in or the name a
 [plugin provider](../guides/extending.md#providers) registers.
 
@@ -313,8 +347,8 @@ to `~/.stratus/agents/<id>.md` (or back into its agents-folder directory
 and link it) and reload the roster; creating a new agent with the same id
 picks up its conversations and memory too.
 
-The built-in agent can't be deleted, nor can a soul your config names as
-the default (change the config first). An agent with a conversation running
+A soul your config names as the default can't be deleted (change the
+config first). An agent with a conversation running
 or waiting on an approval is refused until that turn is stopped or
 answered.
 
@@ -364,11 +398,7 @@ Slack tokens in that state either: a roster that would not load cannot
 prove which ids are missing, and the tokens at risk belong to agents that
 are perfectly fine. (An unreadable *single* soul still degrades to a
 warning — one broken file never takes the team down. A collision has no
-correct winner, which is the difference.) The built-in `stratus` id is
-reserved: souls claiming it are skipped — including two of them, since
-neither was going to get the id, so their agreeing on it is not a collision
-to refuse over — in any case it is spelled, since `agents/Stratus/` is the
-built-in agent's own state directory wherever the filesystem folds case.
+correct winner, which is the difference.)
 
 Two ids the **filesystem** would treat as one name are the same collision,
 and are refused the same way. An id names the agent's directory under
@@ -384,7 +414,7 @@ on the laptop finds the problem at the worst moment. Rename one of the two.
 
 The configured default soul is held to the same rule from the other side.
 It does not live on the roster, so it is checked against the agents already
-registered when it resolves: a default whose id would open a roster agent's
-directory — or the built-in `stratus`'s — is ignored with a line saying so,
-and agentId-less turns route to the built-in until you rename one of them.
+registered when it resolves: a default whose id would open a roster agent's directory is ignored with a
+line saying so, and turns that name no agent fail until you rename one of
+them.
 The roster agent keeps serving either way.
