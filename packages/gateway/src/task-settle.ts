@@ -219,7 +219,9 @@ export const taskNoticeText = (
     return `[${text}]`;
   }
   const count = unread.length === 1 ? '1 follow-up' : `${unread.length} follow-ups`;
-  const listed = unread.map((followUp) => `- ${capped(followUp)}`).join('\n');
+  // One budget for the whole list, not one each: a task on a provider that
+  // reads none mid-task can end with any number of them.
+  const listed = capped(unread.map((followUp) => `- ${followUp}`).join('\n'));
   return `[${text}\n${count} sent with agent.messageTask never reached it, because it ended first:\n${listed}]`;
 };
 
