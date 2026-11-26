@@ -3,6 +3,7 @@ import {
   isTaintedTrust,
   leastTrusted,
   sessionWriteTrust,
+  type ExecutionContext,
   type JsonObject,
   type Session,
   type Tool,
@@ -71,6 +72,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
     session: Session,
     cadence: ScheduleCadence,
     input: JsonObject,
+    context: ExecutionContext | undefined,
   ): Promise<JsonObject> => {
     const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : '';
     if (!prompt) {
@@ -98,6 +100,9 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
       ...(destination ? { destination } : {}),
       createdBy: session.id,
       trust: sessionWriteTrust(session),
+      // From the runner alone, never the input: a person said yes to this
+      // call, so they were shown this prompt.
+      ...(context?.approvedBy !== undefined ? { approvedBy: context.approvedBy } : {}),
     });
     return { created: true, schedule: describeSchedule(record) };
   };
@@ -118,7 +123,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
         },
         required: ['prompt'],
       },
-      async execute(input: JsonObject, session: Session) {
+      async execute(input: JsonObject, session: Session, context?: ExecutionContext) {
         const every = typeof input.every === 'string' ? input.every.trim() : '';
         const cron = typeof input.cron === 'string' ? input.cron.trim() : '';
         if ((every === '') === (cron === '')) {
@@ -129,10 +134,10 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
           if (intervalMs === undefined) {
             throw new Error(`Not an interval: "${every}". Use a positive integer and one unit — "90s", "30m", "2h", "1d".`);
           }
-          return create(session, { kind: 'every', intervalMs }, input);
+          return create(session, { kind: 'every', intervalMs }, input, context);
         }
         parseCronExpression(cron); // Refuse a bad expression here, with its own message.
-        return create(session, { kind: 'cron', expression: cron }, input);
+        return create(session, { kind: 'cron', expression: cron }, input, context);
       },
     },
     {
@@ -149,7 +154,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
         },
         required: ['at', 'prompt'],
       },
-      async execute(input: JsonObject, session: Session) {
+      async execute(input: JsonObject, session: Session, context?: ExecutionContext) {
         const at = typeof input.at === 'string' ? input.at.trim() : '';
         const parsed = new Date(at);
         if (!at || Number.isNaN(parsed.getTime())) {
@@ -158,7 +163,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
         if (parsed.getTime() <= Date.now()) {
           throw new Error(`${at} is in the past — a one-shot schedule must name a future time.`);
         }
-        return create(session, { kind: 'at', at: parsed.toISOString() }, input);
+        return create(session, { kind: 'at', at: parsed.toISOString() }, input, context);
       },
     },
     {
@@ -192,7 +197,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
         },
         required: ['source', 'filter', 'prompt'],
       },
-      async execute(input: JsonObject, session: Session) {
+      async execute(input: JsonObject, session: Session, context?: ExecutionContext) {
         const source = typeof input.source === 'string' ? input.source.trim() : '';
         if (!source) {
           throw new Error('schedule.on needs a "source": the id of an event source the operator configured, like "github".');
@@ -213,7 +218,7 @@ export const createScheduleTools = (scheduler: SchedulerHandle): Tool[] => {
           filter,
           ...(quietHours !== undefined ? { quietHours } : {}),
           ...(maxPerHour !== undefined ? { maxPerHour: maxPerHour as number } : {}),
-        }, input);
+        }, input, context);
       },
     },
     {

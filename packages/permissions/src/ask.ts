@@ -103,14 +103,17 @@ const capStrings = (value: JsonValue): JsonValue => {
  * the same warning the Slack prompt already renders. An honest prompt is
  * the security property here; the realistic few-field call never truncates.
  */
-const summarizeInput = (input: JsonObject): string | undefined => {
+const summarizeInput = (input: JsonObject): { text: string; whole: boolean } | undefined => {
   if (Object.keys(input).length === 0) {
     return undefined;
   }
   const oneLine = JSON.stringify(capStrings(input));
-  return oneLine.length > PROMPT_OVERALL_LIMIT
-    ? `${oneLine.slice(0, PROMPT_OVERALL_LIMIT)}… [arguments truncated — inspect the call before approving]`
-    : oneLine;
+  if (oneLine.length > PROMPT_OVERALL_LIMIT) {
+    return { text: `${oneLine.slice(0, PROMPT_OVERALL_LIMIT)}… [arguments truncated — inspect the call before approving]`, whole: false };
+  }
+  // Whole only when no value was capped either: a capped prompt reads as
+  // complete in its field, which is exactly the part `approvedBy` vouches for.
+  return { text: oneLine, whole: oneLine === JSON.stringify(input) };
 };
 
 /**
@@ -150,8 +153,11 @@ export const awaitPrompt = async (
   const what = command !== undefined
     ? `${call.toolName}: ${command}`
     : argumentSummary !== undefined
-      ? `${acting} (${risk}): ${argumentSummary}`
+      ? `${acting} (${risk}): ${argumentSummary.text}`
       : `${acting} (${risk})`;
+  // What was printed is the whole call only when nothing was cut and no
+  // other field hid behind the command scope.
+  const shownInFull = command === undefined && (argumentSummary === undefined || argumentSummary.whole);
   const pending = ask(
     `${note === undefined ? '' : `Review: ${note}\n`}Allow ${what} for ${session.agent.name}? [y]es / [a]lways (${alwaysMeans}) / [N]o: `,
   );
@@ -168,7 +174,7 @@ export const awaitPrompt = async (
   if (!YES.has(answer)) {
     return { answer: 'deny' };
   }
-  return { answer: ALWAYS.has(answer) ? 'always' : 'once' };
+  return { answer: ALWAYS.has(answer) ? 'always' : 'once', ...(shownInFull ? { shownInFull } : {}) };
 };
 
 /**

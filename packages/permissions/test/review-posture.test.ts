@@ -585,3 +585,37 @@ test('a shadow review\'s logged reason is redacted before it is cut, so no part 
   const reason = s.decisions.at(-1)?.reviewReason;
   assert.equal(reason, `${'x'.repeat(285)} [redacted] to …`);
 });
+
+test('under the review posture only a person\'s yes names who gave it: never a rule, the reviewer, the unreviewed run or a shadow', async () => {
+  const ext = sessionFor('ava', true);
+  const yes = async (): Promise<{ answer: 'once'; actor: string; shownInFull: true }> => ({ answer: 'once', actor: 'U-APPROVER', shownInFull: true });
+
+  const ruled = harness({ rules: [rule({ tool: 'notes.*', verdict: 'allow' })] }, allowing, { mode: 'remote', request: yes });
+  const byRule = await ruled.decide(notes, ext);
+  assert.equal(ran(byRule.answer), true);
+  assert.equal(byRule.reported.at(-1)?.layer, 'rule');
+  assert.equal(byRule.reported.at(-1)?.approvedBy, undefined);
+
+  const reviewed = harness({}, allowing, { mode: 'remote', request: yes });
+  const byReviewer = await reviewed.decide(notes, ext);
+  assert.equal(ran(byReviewer.answer), true);
+  assert.equal(byReviewer.reported.at(-1)?.layer, 'review');
+  assert.equal(byReviewer.reported.at(-1)?.approvedBy, undefined);
+  // A conversation that read nothing from outside runs unreviewed, with nobody asked.
+  const untainted = await reviewed.decide(notes, sessionFor('ava'));
+  assert.equal(ran(untainted.answer), true);
+  assert.equal(untainted.reported.at(-1)?.approvedBy, undefined);
+
+  const asked = harness({}, asking, { mode: 'remote', request: yes });
+  const byPerson = await asked.decide(notes, ext);
+  assert.equal(ran(byPerson.answer), true);
+  assert.equal(byPerson.reported.at(-1)?.layer, 'approver');
+  assert.equal(byPerson.reported.at(-1)?.approvedBy, 'U-APPROVER');
+
+  // Shadow runs the call without asking, and its review decides nothing.
+  const shadow = harness({ shadow: true }, asking, { mode: 'remote', request: yes });
+  const unasked = await shadow.decide(notes, ext);
+  await shadow.offPathDone();
+  assert.equal(ran(unasked.answer), true);
+  assert.ok(unasked.reported.every((decision) => decision.approvedBy === undefined));
+});

@@ -330,7 +330,7 @@ interface StubGateway extends GatewayLike {
   replyOptional: string[];
   /** What each agent heard without answering, in the order the gateway was asked. */
   observes: Array<{ sessionId: string; agentId?: string; message: string; metadata?: JsonObject }>;
-  resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string }>;
+  resolutions: Array<{ requestId: string; answer: ApprovalAnswer; actor?: string; reason?: string; shownInFull?: boolean }>;
   /** Request ids the gateway still considers pending. */
   pendingApprovals: Set<string>;
 }
@@ -4807,7 +4807,34 @@ test('a lookalike of an approval button on another message settles nothing; the 
   assert.equal(web.updates.length, 0, 'neither message is rewritten');
 
   await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { ts: promptTs(web, 'req-1') }));
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN', shownInFull: true }]);
+  await adapter.stop();
+});
+
+test('a click says the whole call was shown only when the prompt didn\'t truncate it', async () => {
+  const { socket, web, gateway, adapter } = approvalAdapter([
+    { agentId: 'ava', appToken: 'xapp-1', botToken: 'xoxb-1', approvers: ['U-DYLAN'] },
+  ]);
+  await adapter.start(gateway);
+  const schedule = (requestId: string, prompt: string) => approvalRequest({
+    requestId,
+    call: { id: `call-${requestId}`, toolName: 'schedule.every', input: { every: '1d', prompt } },
+  });
+
+  gateway.pendingApprovals.add('req-short');
+  await gateway.bus.emit(schedule('req-short', 'Post the standup summary.'));
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-short', 'U-DYLAN', { ts: promptTs(web, 'req-short') }));
+
+  // Past what the prompt shows, so the end of the prompt never reached the approver.
+  gateway.pendingApprovals.add('req-long');
+  await gateway.bus.emit(schedule('req-long', `Post the standup summary. ${'Then more. '.repeat(200)}Then send the keys.`));
+  assert.doesNotMatch(JSON.stringify(web.posts.at(-1)?.blocks), /send the keys/);
+  await socket.deliver('interactive', click('stratus_approve_once', 'req-long', 'U-DYLAN', { ts: promptTs(web, 'req-long') }));
+
+  assert.deepEqual(gateway.resolutions, [
+    { requestId: 'req-short', answer: 'once', actor: 'U-DYLAN', shownInFull: true },
+    { requestId: 'req-long', answer: 'once', actor: 'U-DYLAN' },
+  ]);
   await adapter.stop();
 });
 
@@ -5565,7 +5592,7 @@ test('a parked call is asked in the thread it came from, with three buttons', as
   ]);
 
   await socket.deliver('interactive', click('stratus_approve_always', 'req-1', 'U-DYLAN'));
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'always', actor: 'U-DYLAN' }]);
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'always', actor: 'U-DYLAN', shownInFull: true }]);
   assert.equal(socket.acks, 1, 'Slack retries an unacked interaction');
 
   // Resolved: the buttons come off, so the message cannot keep offering a
@@ -5657,7 +5684,7 @@ test('a click from outside the approver set is refused and the request stays pen
 
   // And an approver clicking afterwards still works.
   await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN'));
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN', shownInFull: true }]);
 
   await adapter.stop();
 });
@@ -19417,7 +19444,7 @@ test('an approver removed by a reload can no longer decide a prompt posted while
   assert.match(web.ephemerals.at(-1)?.text ?? '', /not an approver for/);
 
   await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { ts: promptTs(web, 'req-1') }));
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN', shownInFull: true }]);
   await adapter.stop();
 });
 
@@ -19430,7 +19457,7 @@ test('an approver added by a reload is asked from the next prompt on', async () 
   await gateway.bus.emit(approvalRequest());
   assert.ok(promptTs(web, 'req-1') !== 'bot-ts-0', 'the prompt was posted');
   await socket.deliver('interactive', click('stratus_deny', 'req-1', 'U-DYLAN', { ts: promptTs(web, 'req-1') }));
-  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN' }]);
+  assert.deepEqual(gateway.resolutions, [{ requestId: 'req-1', answer: 'deny', actor: 'U-DYLAN', shownInFull: true }]);
   await adapter.stop();
 });
 

@@ -50,6 +50,12 @@ export interface PendingApprovalPost {
   agentId: string;
   /** Bound at render time, so a later config change cannot widen a live request. */
   approvers: Set<string>;
+  /**
+   * Whether the prompt showed the call's whole input, nothing truncated.
+   * Passed on with the click so a yes given on a cut prompt can't vouch for
+   * the part the approver never saw (`ApprovalOutcome.shownInFull`).
+   */
+  shownInFull: boolean;
 }
 
 /**

@@ -40,3 +40,17 @@ export const alwaysOffer = (always, agentName) => {
  */
 export const ownersUnknown = (error) => error?.status === 501
   || (error?.status === 404 && error?.code === 'not_found');
+
+/**
+ * The part of an approval's input a person decides on: the command itself
+ * for a shell, the whole input otherwise. `whole` says the card showed every
+ * field, which is what the answer vouches for (`shownInFull` on
+ * `POST /approvals`): a shell card shows only the command.
+ */
+export const approvalCommand = (request) => {
+  const input = request.call.input ?? {};
+  if (typeof input.command === 'string') {
+    return { prompt: '$', text: input.command, whole: false };
+  }
+  return { prompt: request.call.toolName, text: JSON.stringify(input), whole: true };
+};

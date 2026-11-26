@@ -6,3 +6,5 @@ export type AlwaysMeans = 'scope' | 'origin' | 'tool' | 'destination' | 'session
 export const alwaysOffer: (always: AlwaysMeans | undefined, agentName: string) => string | undefined;
 /** Whether a failed GET /grants means the daemon can't list grant owners (501, or 404 not_found from a daemon without the route). */
 export const ownersUnknown: (error: unknown) => boolean;
+/** What an approval card shows of the call, and whether that was every field (`shownInFull` on POST /approvals). */
+export const approvalCommand: (request: { call: { toolName: string; input?: Record<string, unknown> } }) => { prompt: string; text: string; whole: boolean };

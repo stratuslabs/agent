@@ -321,6 +321,12 @@ export interface GatewayLike {
     answer: ApprovalAnswer;
     actor?: string;
     /**
+     * True only when the person was shown the call's whole input. An
+     * adapter that cuts long arguments leaves it off for a cut prompt; see
+     * `ApprovalOutcome.shownInFull`.
+     */
+    shownInFull?: boolean;
+    /**
      * `undeliverable` when the adapter settled the request itself because
      * it could not put it to anyone. Defaults to `decided`, which means a
      * person answered — never claim it for an automatic denial.

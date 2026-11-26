@@ -2,7 +2,7 @@ import { el, until } from '../lib/dom.js';
 import { api, ApiError } from '../lib/api.js';
 import { avatar } from '../lib/avatar.js';
 import { icon } from '../lib/icons.js';
-import { alwaysOffer } from '../lib/grants.js';
+import { alwaysOffer, approvalCommand } from '../lib/grants.js';
 import { answeredHere, refreshCore, store } from '../app.js';
 
 /** What a call is asking to do, in words, for the card's title. */
@@ -16,15 +16,6 @@ const asking = (request) => {
   if (tool === 'agent.delegate') return 'hand work to another agent';
   if (tool.startsWith('browser.')) return request.origin ? `use the browser on ${request.origin}` : 'use the browser';
   return `use ${tool}`;
-};
-
-/** The part of the input a person decides on: the command itself for a shell, the input otherwise. */
-const commandOf = (request) => {
-  const input = request.call.input ?? {};
-  if (typeof input.command === 'string') {
-    return { prompt: '$', text: input.command };
-  }
-  return { prompt: request.call.toolName, text: JSON.stringify(input) };
 };
 
 /**
@@ -90,7 +81,7 @@ export const approvalCard = (request) => {
     unsent.delete(request.requestId);
     for (const button of buttons) button.disabled = true;
     try {
-      await api.resolveApproval({ requestId: request.requestId, answer });
+      await api.resolveApproval({ requestId: request.requestId, answer, ...(approvalCommand(request).whole ? { shownInFull: true } : {}) });
     } catch (error) {
       if (!(error instanceof ApiError && error.status === 409 && error.code === 'approval_not_pending')) {
         // Not sent: say so on the card, which is still waiting.
@@ -102,7 +93,7 @@ export const approvalCard = (request) => {
     await refreshCore();
   };
 
-  const command = commandOf(request);
+  const command = approvalCommand(request);
   const canRemember = !request.oneShot && !request.delegatedFrom && request.risk !== 'dangerous';
   const deny = el('button', { class: 'btn danger-text', disabled: locked }, 'Deny');
   const always = canRemember ? el('button', { class: 'btn', disabled: locked }, 'Always allow') : null;

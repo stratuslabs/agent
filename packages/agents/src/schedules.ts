@@ -83,6 +83,19 @@ export interface ScheduleRecord {
    */
   trust?: TrustLevel;
   /**
+   * Who approved the call that set this schedule, when a person said yes to
+   * that exact call (`ExecutionContext.approvedBy`): the approver's
+   * channel-native id, `terminal` for the local prompt, or `remote` for a
+   * remote answer that named nobody. That person was shown this prompt, so
+   * under the review posture it counts as the request even when `trust` is
+   * `external`. Absent when the call ran on anything else (a standing
+   * grant, an open posture, an operator rule, the reviewer) and on a
+   * schedule set before this was recorded. Never changed afterwards: an
+   * edit that changes the prompt must clear it unless a person approves
+   * that edit.
+   */
+  approvedBy?: string;
+  /**
    * The next slot, ISO-8601. Consumed — advanced — BEFORE the dispatch, so
    * a daemon that dies mid-firing can never run the same window twice.
    * Absent for a spent one-shot: it will not fire again and its row stays
@@ -331,6 +344,8 @@ export interface ScheduleCreateInput {
   createdBy?: string;
   /** That session's trust label at the time — see `ScheduleRecord.trust`. */
   trust?: TrustLevel;
+  /** Who approved the creating call, when a person did — see `ScheduleRecord.approvedBy`. */
+  approvedBy?: string;
 }
 
 /**

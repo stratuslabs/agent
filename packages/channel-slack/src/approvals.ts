@@ -197,6 +197,7 @@ export const createApprovalPrompts = ({
             ...(taskId ? { taskId } : {}),
             agentId: event.agentId,
             approvers,
+            shownInFull: !renderInvocation(event.call.input).truncated,
           }
         : undefined;
       failure = post ? undefined : `Slack accepted the approval request for ${event.agentId} without a timestamp`;
