@@ -19,6 +19,7 @@ import {
   readWorkingDirectory,
   DEFAULT_CONFIG_FILENAME,
   ignoredConfigKeys,
+  ConfigFileError,
   loadConfigFile,
   resolveAgentPrincipals,
   gatewayInfoPath,
@@ -179,6 +180,8 @@ export interface DoctorReport {
   configInUse?: string;
   /** Config files that exist but lost to `configInUse`, nearest first. */
   configShadowed: string[];
+  /** The project config discovery passed over because it can't be read or parsed. */
+  configSkipped?: string;
   provider: DoctorSetting;
   model?: DoctorSetting;
   soul?: DoctorSetting;
@@ -526,7 +529,22 @@ export const collectDoctorReport = async (
       ];
   const present: Array<{ path: string; label: string }> = [];
   let unreadable: { path: string; label: string } | undefined;
+  // A project file that won't load, which discovery passes over for the
+  // next candidate (`discoverConfigLocation`): it is not the config in use.
+  let skippedProject: { path: string; reason: string } | undefined;
   for (const candidate of candidates) {
+    if (candidate.label === 'project') {
+      try {
+        await loadConfigFile(candidate.path);
+        present.push(candidate);
+      } catch (error) {
+        if ((error as ConfigFileError).code !== 'ENOENT') {
+          const cause = error instanceof ConfigFileError ? error.cause : error;
+          skippedProject = { path: candidate.path, reason: cause instanceof Error ? cause.message : String(cause) };
+        }
+      }
+      continue;
+    }
     try {
       await readFile(candidate.path, 'utf8');
       present.push(candidate);
@@ -554,6 +572,12 @@ export const collectDoctorReport = async (
   }
   const winner = unreadable ?? present[0];
   const shadowed = unreadable ? [] : present.slice(1);
+  if (skippedProject !== undefined) {
+    problems.push(
+      `${skippedProject.path} can't be used (${skippedProject.reason}), so runs started in this directory skip it`
+      + `${unreadable ? '' : ` and use ${winner?.path ?? 'the built-in defaults'}`}. Fix it or remove it.`,
+    );
+  }
   if (winner && shadowed.length > 0 && winner.label.startsWith('project')) {
     problems.push(
       `${winner.path} outranks ${shadowed.map((entry) => entry.path).join(' and ')} for runs started in this directory. `
@@ -1061,6 +1085,7 @@ export const collectDoctorReport = async (
   return {
     ...(winner ? { configInUse: winner.path } : {}),
     configShadowed: shadowed.map((entry) => entry.path),
+    ...(skippedProject ? { configSkipped: skippedProject.path } : {}),
     provider,
     ...(model ? { model } : {}),
     ...(soulPath ? { soul: { value: soulPath, source: soulSource } } : {}),
@@ -1119,6 +1144,9 @@ export const runDoctor = async (
   writeLine(streams.stdout, `  config    ${report.configInUse ?? 'none found — built-in defaults apply'}`);
   for (const shadowedPath of report.configShadowed) {
     writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
+  }
+  if (report.configSkipped !== undefined) {
+    writeLine(streams.stdout, `            (${report.configSkipped} skipped: it can't be used)`);
   }
   writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
   const folder = report.agentsFolder;

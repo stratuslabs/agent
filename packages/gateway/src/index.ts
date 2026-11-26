@@ -254,7 +254,7 @@ import {
   PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
   loadConfigFile,
-  resolveConfigLocation,
+  discoverConfigLocation,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   runsOnHarness,
@@ -760,6 +760,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The last successfully loaded config snapshot, serving dispatches while
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
+  // The last project config discovery passed over, said once per new
+  // reason rather than on every dispatch.
+  let lastSkippedConfig: string | undefined;
   /**
    * Read from the home once, on first use, which is after the migrations
    * `serve` runs before it starts the gateway. It changes only when 0005
@@ -2234,12 +2237,29 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // in a real conversation. With no known-good snapshot to fall back
     // on, failing is the honest outcome. Credential and provider errors
     // are never masked — only the file itself degrades.
+    //
+    // A project config in the daemon's folder that won't load is skipped
+    // by discovery for the global one, so a broken untrusted file is never
+    // the reason nothing dispatches. One the daemon was running on is the
+    // mid-edit case again, though, and keeps its last good snapshot rather
+    // than moving to another file's provider.
     let configSnapshot: NonNullable<RuntimeSelection['presetConfig']>;
     try {
-      const location = await resolveConfigLocation(
+      const { location, skipped } = await discoverConfigLocation(
         options.selection?.configPath ? { configPath: options.selection.configPath } : {},
         env,
       );
+      if (skipped !== undefined && lastGoodConfigSnapshot?.path === skipped.path) {
+        // The catch below serves the last good snapshot and says so.
+        throw new ConfigFileError(skipped.path, new Error(skipped.reason));
+      }
+      const skippedLine = skipped === undefined
+        ? undefined
+        : `ignoring ${skipped.path}, which can't be used (${skipped.reason}); serving on ${location?.path ?? 'built-in defaults'}`;
+      if (skippedLine !== undefined && skippedLine !== lastSkippedConfig) {
+        warn(skippedLine);
+      }
+      lastSkippedConfig = skippedLine;
       configSnapshot = location
         ? { config: await loadConfigFile(location.path), trusted: location.trusted, path: location.path }
         : { config: {}, trusted: true };

@@ -1876,6 +1876,53 @@ test('runCli chat holds one session across piped turns', async () => {
   assert.doesNotMatch(output.stdout, /\[/);
 });
 
+test('run and chat skip a broken project config with one warning and use the trusted one', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  const globalPath = path.join(home, '.stratus', 'config.json');
+  const projectPath = path.join(project, 'stratus.config.json');
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(globalPath, JSON.stringify({ provider: 'demo' }));
+  await writeFile(projectPath, '{ "provider": "demo",, }');
+  const skipLine = /Warning: skipping .*stratus\.config\.json, which can't be used \(.*JSON.*\)\. This run uses .*config\.json instead\./;
+
+  const run = createStreams();
+  assert.equal(await runCli({ argv: ['run', 'hello'], streams: run.streams, env: { cwd: project, homeDir: home, processEnv: {} } }), 0, run.output.stderr);
+  assert.match(run.output.stdout, /Prompt received: hello/);
+  assert.match(run.output.stderr, skipLine);
+  assert.equal(run.output.stderr.match(/Warning: skipping/g)?.length, 1);
+
+  const chat = createStreams();
+  assert.equal(await runCli({
+    argv: ['chat'],
+    streams: chat.streams,
+    env: { cwd: project, homeDir: home, processEnv: {}, stdinStream: Readable.from(['hello\n/exit\n']) },
+  }), 0, chat.output.stderr);
+  assert.match(chat.output.stdout, /Prompt received: hello/);
+  assert.equal(chat.output.stderr.match(/Warning: skipping/g)?.length, 1);
+  assert.match(chat.output.stderr, skipLine);
+
+  // Named by --config or STRATUS_CONFIG, the file is what was asked for,
+  // so the run fails on it instead.
+  for (const [label, argv, processEnv] of [
+    ['--config', ['run', '--config', './stratus.config.json', 'hello'], {}],
+    ['STRATUS_CONFIG', ['run', 'hello'], { STRATUS_CONFIG: './stratus.config.json' }],
+  ] as const) {
+    const named = createStreams();
+    assert.equal(await runCli({ argv: [...argv], streams: named.streams, env: { cwd: project, homeDir: home, processEnv: { ...processEnv } } }), 1, label);
+    assert.match(named.output.stderr, /Could not use config .*stratus\.config\.json/, label);
+    assert.doesNotMatch(named.output.stderr, /Warning: skipping/, label);
+  }
+
+  // With nothing behind it, the run fails for its own reason, and the
+  // skipped file is still named, so nobody goes to setup for the wrong one.
+  await rm(globalPath);
+  const alone = createStreams();
+  assert.equal(await runCli({ argv: ['run', 'hello'], streams: alone.streams, env: { cwd: project, homeDir: home, processEnv: {} } }), 1);
+  assert.match(alone.output.stderr, /Warning: skipping .*This run uses the built-in defaults instead\./);
+  assert.match(alone.output.stderr, /No provider is configured/);
+});
+
 test('runCli chat routes approval answers through the chat readline', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
@@ -7335,14 +7382,55 @@ test('serve warns for a roster agent whose soul pins the demoted provider', asyn
   assert.equal(output.stderr.match(/outranks the Claude subscription/g)?.length, 1);
 });
 
-test('doctor stops discovery at the first unreadable config', async () => {
+test('doctor names a project config it skips, and shows the config runs here use instead', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  const globalPath = path.join(home, '.stratus', 'config.json');
+  const projectPath = path.join(project, 'stratus.config.json');
   await mkdir(path.join(home, '.stratus'), { recursive: true });
-  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic' }));
-  // A directory where a file is expected: readable() fails with EISDIR, and
-  // resolveConfigLocation throws rather than trying the global config.
-  await mkdir(path.join(project, 'stratus.config.json'), { recursive: true });
+  await writeFile(globalPath, JSON.stringify({ provider: 'demo' }), { mode: 0o600 });
+  const escaped = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  // A file that won't parse, and a directory where the file would be: both
+  // are passed over for the global config, as a run started here does.
+  for (const [label, make, reason] of [
+    ['bad JSON', () => writeFile(projectPath, '{ "provider": "demo",, }'), /JSON/],
+    ['a directory', () => mkdir(projectPath), /EISDIR/],
+  ] as const) {
+    await make();
+    const { streams, output } = createStreams();
+    await runCli({ argv: ['doctor'], streams, env: { cwd: project, homeDir: home, processEnv: {} } });
+    assert.match(output.stdout, new RegExp(`config {4}${escaped(globalPath)}`), label);
+    assert.match(output.stdout, new RegExp(`\\(${escaped(projectPath)} skipped: it can't be used\\)`), label);
+    assert.match(output.stdout, new RegExp(`${escaped(projectPath)} can't be used \\(.*\\), so runs started in this directory skip it and use ${escaped(globalPath)}`), label);
+    assert.match(output.stdout, reason, label);
+    assert.match(output.stdout, /provider\s+demo/, label);
+    assert.doesNotMatch(output.stdout, /Every run fails|could not be parsed|outranks/, label);
+    assert.doesNotMatch(output.stderr, /ignoring unreadable config/, label);
+
+    const json = createStreams();
+    await runCli({ argv: ['doctor', '--format', 'json'], streams: json.streams, env: { cwd: project, homeDir: home, processEnv: {} } });
+    const report = JSON.parse(json.output.stdout) as { configInUse?: string; configSkipped?: string; configShadowed: string[] };
+    assert.equal(report.configInUse, globalPath, label);
+    assert.equal(report.configSkipped, projectPath, label);
+    assert.deepEqual(report.configShadowed, [], label);
+    await rm(projectPath, { recursive: true, force: true });
+  }
+
+  // Named, the same file is required, so doctor says every run fails.
+  await writeFile(projectPath, '{ broken');
+  const named = createStreams();
+  await runCli({ argv: ['doctor', '--config', projectPath], streams: named.streams, env: { cwd: project, homeDir: home, processEnv: {} } });
+  assert.match(named.output.stdout, /could not be parsed .*Every run fails/);
+  assert.doesNotMatch(named.output.stdout, /skipped/);
+});
+
+test('doctor stops discovery at a global config that cannot be read', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-project-'));
+  // A directory where the global file is expected: discovery throws rather
+  // than running on built-in defaults the operator never chose.
+  await mkdir(path.join(home, '.stratus', 'config.json'), { recursive: true });
 
   const { streams, output } = createStreams();
   const exitCode = await runCli({
@@ -7353,10 +7441,7 @@ test('doctor stops discovery at the first unreadable config', async () => {
 
   assert.equal(exitCode, 1);
   assert.match(output.stdout, /exists but cannot be read/);
-  assert.match(output.stdout, /discovery never reaches a lower-priority config/);
-  // The global file is never active for runs started here, so naming it as
-  // the config in use would point at the wrong file entirely.
-  assert.doesNotMatch(output.stdout, new RegExp(`config {4}${path.join(home, '.stratus', 'config.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(output.stdout, /Every run fails here/);
 });
 
 test('doctor blames the setting that actually selected demo', async () => {
@@ -10869,11 +10954,14 @@ test('the managed daemon does not duplicate the event stream to an unrotated fil
   assert.match(plist, /stratusd\.out\.log/);
 });
 
-test('service install refuses a malformed config it would have discovered', async () => {
+test('service install warns about a broken project config the daemon will skip, and installs', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
+  await mkdir(path.join(home, '.stratus'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'demo' }));
   // No --config, so the unit carries no flag and discovers from this very
-  // directory once it runs. A broken file here breaks every dispatch.
+  // directory once it runs, where it skips this file for the global one.
+  // Whoever installs from here may well mean that file, so it is said.
   await writeFile(path.join(project, 'stratus.config.json'), '{ broken');
 
   const calls: string[] = [];
@@ -10885,13 +10973,14 @@ test('service install refuses a malformed config it would have discovered', asyn
       cwd: project,
       homeDir: home,
       processEnv: {},
-      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return { code: 0, stdout: '', stderr: '' }; },
+      servicePlatform: 'linux',
+      serviceRunner: async (command, args) => { calls.push([command, ...args].join(' ')); return stubServiceRunner(command, args); }, serviceSleep: noServiceWait,
     },
   });
 
-  assert.equal(exitCode, 1);
-  assert.deepEqual(calls, []);
-  assert.match(output.stderr, /cannot be used/);
+  assert.equal(exitCode, 0, output.stderr);
+  assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
+  assert.match(output.stderr, /Warning: skipping .*stratus\.config\.json, which can't be used .*The daemon will skip it too and use .*config\.json/);
 });
 
 test('a demo setup still installs, since it needs no credential at all', async () => {
@@ -10916,13 +11005,13 @@ test('a demo setup still installs, since it needs no credential at all', async (
   assert.ok(calls.some((call) => /enable --now/.test(call)), calls.join(', '));
 });
 
-test('a config that exists but cannot be read blocks the install', async () => {
+test('a global config that exists but cannot be read blocks the install', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-'));
-  // A directory where a config file belongs: discovery throws rather than
-  // moving on, and treating that as "no config" would install a daemon
-  // that hits the same error on its first dispatch.
-  await mkdir(path.join(project, 'stratus.config.json'), { recursive: true });
+  // A directory where the global config belongs: discovery throws rather
+  // than moving on, and treating that as "no config" would install a
+  // daemon that hits the same error on its first dispatch.
+  await mkdir(path.join(home, '.stratus', 'config.json'), { recursive: true });
 
   const calls: string[] = [];
   const { streams, output } = createStreams();

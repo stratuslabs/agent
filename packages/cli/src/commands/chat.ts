@@ -8,7 +8,7 @@ import { formatEvent } from '../events.ts';
 import { writeLine } from '../io.ts';
 import { defaultApprovalMode, type ParsedChatCommand } from '../parse.ts';
 import { stratusHeaderLines } from '../prompter.ts';
-import { resolveRuntimeConfig, warnOnCredentialOverride, warnOnUntrustedConfig, createAgentRuntime } from '../runtime.ts';
+import { resolveRuntimeConfig, warnOnCredentialOverride, warnOnSkippedConfig, warnOnUntrustedConfig, createAgentRuntime } from '../runtime.ts';
 
 const lastAssistantReply = (session: Session): string => {
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
@@ -32,6 +32,7 @@ export const runChat = async (
   streams: CliStreams,
   env: CliEnvironment = {},
 ): Promise<number> => {
+  await warnOnSkippedConfig(command.configPath ? { configPath: command.configPath } : {}, env, streams);
   const runtime = await resolveRuntimeConfig({
     command: 'run',
     prompt: '',

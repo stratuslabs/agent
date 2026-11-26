@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentRunner, ContextOverflowError, EventBus, HostRefusalError, InMemorySessionStore, type Session } from '@stratusagent/core';
-import { chmod, mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -791,15 +791,80 @@ test('config file errors are typed and preserve the underlying fs code', async (
     (error: unknown) => error instanceof ConfigFileError,
   );
 
-  // Auto-discovery over a candidate that exists but cannot be read (here:
-  // a directory wearing the config filename) fails typed as well — the
-  // same degradation path as a parse failure.
+  // Auto-discovery over a global config that exists but cannot be read
+  // (here: a directory wearing the config filename) fails typed as well —
+  // the same degradation path as a parse failure.
+  await mkdir(path.join(home, '.stratus', 'config.json'), { recursive: true });
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-proj-'));
-  await mkdir(path.join(project, 'stratus.config.json'));
   await assert.rejects(
     () => resolveConfigLocation({}, { homeDir: home, cwd: project }),
     (error: unknown) => error instanceof ConfigFileError,
   );
+});
+
+test('an auto-found project config that cannot be used is skipped for the trusted one; a named one still fails', async () => {
+  const { discoverConfigLocation, resolveConfigLocation, resolveRuntimeConfig, ConfigFileError } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skip-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-skip-proj-'));
+  const env = { homeDir: home, cwd: project, processEnv: {} };
+  const globalPath = globalConfigPath(env);
+  const projectPath = path.join(project, 'stratus.config.json');
+  await mkdir(path.dirname(globalPath), { recursive: true });
+  await writeFile(globalPath, JSON.stringify({ provider: 'demo' }));
+
+  // Every way the file can fail to load: it doesn't parse, it isn't a
+  // config, it can't be read at all. Each is passed over for the global
+  // file, which is the config a run started here uses, and named.
+  const broken: Array<[string, () => Promise<void>, RegExp]> = [
+    ['bad JSON', () => writeFile(projectPath, '{ "provider": "demo",, }'), /JSON/],
+    ['not an object', () => writeFile(projectPath, '[]'), /JSON object/],
+    ['a directory', () => mkdir(projectPath), /EISDIR/],
+  ];
+  for (const [label, make, reason] of broken) {
+    await make();
+    const found = await discoverConfigLocation({}, env);
+    assert.deepEqual(found.location, { path: globalPath, trusted: true }, label);
+    assert.equal(found.skipped?.path, projectPath, label);
+    assert.match(found.skipped?.reason ?? '', reason, label);
+    assert.doesNotMatch(found.skipped?.reason ?? '', /Could not use config/, `${label}: the reason is the cause alone`);
+    assert.deepEqual(await resolveConfigLocation({}, env), { path: globalPath, trusted: true }, label);
+    assert.equal((await resolveRuntimeConfig({}, env)).provider, 'demo', label);
+    await rm(projectPath, { recursive: true, force: true });
+  }
+
+  // With no global file behind it, nothing is found, and the skip is still said.
+  await writeFile(projectPath, '{ broken');
+  await rm(globalPath);
+  const alone = await discoverConfigLocation({}, env);
+  assert.equal(alone.location, undefined);
+  assert.equal(alone.skipped?.path, projectPath);
+
+  // A file that loads is used, as before, and nothing is skipped.
+  await writeFile(projectPath, JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await discoverConfigLocation({}, env), { location: { path: projectPath, trusted: false } });
+
+  // A file somebody named is not discovered, so it is not skipped: a run
+  // on it fails, through --config and STRATUS_CONFIG alike.
+  await writeFile(globalPath, JSON.stringify({ provider: 'demo' }));
+  await writeFile(projectPath, '{ broken');
+  const viaEnv = { ...env, processEnv: { STRATUS_CONFIG: './stratus.config.json' } };
+  for (const [label, selection, runEnv] of [
+    ['--config', { configPath: './stratus.config.json' }, env],
+    ['STRATUS_CONFIG', {}, viaEnv],
+  ] as const) {
+    assert.deepEqual(await discoverConfigLocation(selection, runEnv), { location: { path: projectPath, trusted: true } }, label);
+    await assert.rejects(
+      () => resolveRuntimeConfig(selection, runEnv),
+      (error: unknown) => error instanceof ConfigFileError && error.configPath === projectPath,
+      label,
+    );
+  }
+
+  // A broken global file is the operator's own, and still fails discovery
+  // behind a skipped project file.
+  await rm(globalPath);
+  await mkdir(globalPath);
+  await assert.rejects(() => discoverConfigLocation({}, env), (error: unknown) => error instanceof ConfigFileError && error.configPath === globalPath);
 });
 
 test('the fallback switch persists before the fallback attempt begins', async () => {

@@ -2304,6 +2304,45 @@ test('config degradation serves the last known-good config, never the demo defau
   assert.ok(warnings.some((line) => line.includes('config')));
 });
 
+test('a broken project config in the daemon\'s folder is skipped for the global one, unless the daemon was running on it', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'openai', model: 'model-global' }));
+  const project = path.join(home, 'checkout');
+  await mkdir(project, { recursive: true });
+  const projectConfig = path.join(project, 'stratus.config.json');
+
+  const requestedModels: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    requestedModels.push((JSON.parse(String(init?.body)) as { model: string }).model);
+    return openAiText('real provider reply');
+  }) as typeof fetch;
+  const env = { homeDir: home, cwd: project, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+
+  // Broken before the daemon ever read it: an untrusted file can't be the
+  // reason nothing dispatches, so the global config serves, and the skip is
+  // said once rather than on every turn.
+  await writeFile(projectConfig, '{ "provider": ');
+  const warnings: string[] = [];
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: (line) => warnings.push(line) });
+  await gateway.start();
+  const first = await gateway.dispatch({ sessionId: 'skip-1', agentId: 'ava', userMessage: 'hi' });
+  await gateway.dispatch({ sessionId: 'skip-1', userMessage: 'again' });
+  assert.equal(first.status, 'completed');
+  assert.deepEqual(requestedModels, ['model-global', 'model-global']);
+  assert.equal(warnings.filter((line) => line.includes(projectConfig)).length, 1, warnings.join('\n'));
+
+  // Fixed, it is used. Broken again mid-edit, the daemon keeps the project
+  // config it was running on instead of moving to the global one.
+  await writeFile(projectConfig, JSON.stringify({ provider: 'openai', model: 'model-project' }));
+  await gateway.dispatch({ sessionId: 'skip-1', userMessage: 'project now?' });
+  await writeFile(projectConfig, '{ "provider": ');
+  await gateway.dispatch({ sessionId: 'skip-1', userMessage: 'still project?' });
+  await gateway.stop();
+  assert.deepEqual(requestedModels.slice(2), ['model-project', 'model-project']);
+  assert.ok(warnings.some((line) => line.includes('last known-good')), warnings.join('\n'));
+});
+
 test('an empty STRATUS_PROVIDER is no default at all for the credential scrub', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');
