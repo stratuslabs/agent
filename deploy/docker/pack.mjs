@@ -17,6 +17,13 @@
 // its tarball, so a transitive `@stratusagent/core@0.11.6` is this commit's
 // core rather than whatever the registry holds under that version — a local
 // build must never quietly mix in published code.
+//
+// The one exception is named below: first-party packages that release from
+// stratuslabs/plugins on their own versions, so this checkout has no tarball
+// of them. The web dashboard is one. It is installed from the registry at
+// its latest release, the version `stratus dashboard` and `stratus update`
+// install (FIRST_PARTY_SEPARATE_PACKAGES in packages/cli/src/plugin-catalog.ts),
+// because the image's read-only root filesystem leaves no way to add it later.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -33,6 +40,10 @@ const readManifest = (dir) => {
   } catch {
     return undefined;
   }
+};
+
+const SEPARATE_RELEASES = {
+  '@stratusagent/dashboard': 'latest',
 };
 
 const tarballs = {};
@@ -60,8 +71,9 @@ if (!tarballs['@stratusagent/cli']) {
 writeFileSync(path.join(out, 'package.json'), `${JSON.stringify({
   name: 'stratus-image',
   private: true,
-  description: 'Every first-party Stratus package, installed flat from this commit\'s tarballs.',
-  dependencies: tarballs,
+  description: 'Every first-party Stratus package, installed flat: this commit\'s tarballs, and the latest release of each that releases on its own.',
+  // Should a tarball of the same name ever be packed, it wins.
+  dependencies: { ...SEPARATE_RELEASES, ...tarballs },
   overrides: tarballs,
 }, null, 2)}\n`);
 process.stdout.write(`packed ${Object.keys(tarballs).length} packages into ${out}\n`);
