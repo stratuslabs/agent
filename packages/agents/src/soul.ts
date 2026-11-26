@@ -79,8 +79,7 @@ export interface SoulFront {
 /**
  * What a front always has, beside its quick set: starting work in the
  * background, seeing it and stopping it, and passing a follow-up to it.
- * The last is named before it exists so a soul written today reaches it the
- * day it ships; a name nothing registered grants nothing. Literals, not the
+ * Literals, not the
  * tools' name constants: `tools/delegate.ts` imports this file, and a cycle
  * read at module load is a crash that depends on import order. A test holds
  * them equal.

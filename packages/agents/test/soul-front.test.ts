@@ -6,6 +6,7 @@ import {
   DELEGATE_TOOL_NAME,
   FRONT_TASK_TOOLS,
   formatSoul,
+  MESSAGE_TASK_TOOL_NAME,
   frontToolEntries,
   parseSoul,
   TASKS_TOOL_NAME,
@@ -67,7 +68,7 @@ test('a front: block that would load as something other than what it says is ref
 
 test('the front always holds the task tools, and the quick set unless front.tools replaces it', () => {
   // Held equal to the tools' own names, which the soul module can't import.
-  assert.deepEqual(FRONT_TASK_TOOLS.slice(0, 3), [DELEGATE_TOOL_NAME, TASKS_TOOL_NAME, CANCEL_TASK_TOOL_NAME]);
+  assert.deepEqual(FRONT_TASK_TOOLS, [DELEGATE_TOOL_NAME, TASKS_TOOL_NAME, CANCEL_TASK_TOOL_NAME, MESSAGE_TASK_TOOL_NAME]);
   assert.deepEqual(frontToolEntries({ model: 'm' }), [...FRONT_TASK_TOOLS, ...DEFAULT_FRONT_TOOLS]);
   assert.deepEqual(frontToolEntries({ model: 'm', tools: ['fs.write'] }), [...FRONT_TASK_TOOLS, 'fs.write']);
   assert.deepEqual(frontToolEntries({ model: 'm', tools: [] }), [...FRONT_TASK_TOOLS]);

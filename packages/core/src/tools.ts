@@ -766,6 +766,15 @@ export const DEFAULT_SUBPROCESS_PASS_ENV: readonly string[] = ['PATH', 'HOME', '
 export interface ExecutionContext {
   signal?: AbortSignal;
   /**
+   * The id of the call being run (`ToolCall.id`), as the transcript records
+   * it, set by the runner on the kernel loop and on a hosted call alike. A
+   * tool whose effect must happen once per call, however often a host asks
+   * it to run that call, keys on it. Providers may reuse an id across
+   * responses, so a key should pair it with the assistant message that
+   * carries the call. Absent when a host runs a tool without the runner.
+   */
+  callId?: string;
+  /**
    * Label this one call's output — the per-call half of the producer
    * channel, for a tool whose output is only sometimes external: an
    * `fs.read` of a file the agent downloaded, an MCP tool with mixed

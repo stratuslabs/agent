@@ -126,8 +126,11 @@ export {
 export {
   TASKS_TOOL_NAME,
   CANCEL_TASK_TOOL_NAME,
+  MESSAGE_TASK_TOOL_NAME,
   createTaskTools,
   type TaskCancelAnswer,
+  type TaskMessageAnswer,
+  type TaskMessageInput,
   type TaskSummary,
   type TaskToolsHost,
 } from './tools/tasks.ts';

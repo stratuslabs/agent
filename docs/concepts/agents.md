@@ -349,9 +349,9 @@ front:
   background task's outcome notice run as the front. Schedule and trigger
   firings, background task workers, delegations and sub-agents run on the
   agent's own model and tools, as they would without the block.
-- **Which tools.** Always `agent.delegate`, `agent.tasks` and
-  `agent.cancelTask` (and `agent.messageTask`, once it ships), plus a quick
-  set: `memory.recall`, `memory.remember`, `message.read`, `message.send`,
+- **Which tools.** Always `agent.delegate`, `agent.tasks`,
+  `agent.cancelTask` and `agent.messageTask`, plus a quick set:
+  `memory.recall`, `memory.remember`, `message.read`, `message.send`,
   `fs.read`, `fs.list` and `fs.search`. `front.tools` replaces the quick set.
   Nothing else, not even the `credential.request` every other turn holds (a
   task asks for a key instead). Neither list ever grants a tool the soul's

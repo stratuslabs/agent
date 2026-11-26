@@ -1505,7 +1505,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     stateHome: stateDir,
     store,
     bus,
-    dispatchInternal: (input, conversation) => dispatchInternal(input, [], undefined, undefined, conversation),
+    dispatchInternal: (input, conversation, steer) => dispatchInternal(input, [], undefined, steer, conversation),
     onSessionChain: (sessionId, work) => onSessionChain(sessionId, work),
     onWorkerChain: (sessionId, work) => onSessionChain(sessionId, work, undefined, { background: true }),
     settleRepeat: (sessionId, idempotencyKey, agentId) => settleRepeat(sessionId, idempotencyKey, agentId, undefined, undefined),

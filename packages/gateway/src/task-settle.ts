@@ -1,6 +1,7 @@
 import {
   carriesKey,
   latestTurnReply,
+  leastTrusted,
   sessionWriteTrust,
   startsTurn,
   turnMessageOf,
@@ -164,39 +165,64 @@ const stepsText = (steps: number): string => (steps === 1 ? '1 step' : `${steps}
 export const taskStoppedError = (taskId: string, stoppedBy: string): string =>
   `Background task ${taskId} was stopped ${stopper(stoppedBy)}.`;
 
-/**
- * The runtime notice for an outcome, from the row and the outcome alone, so
- * settling after a crash builds the same text again.
- */
-export const taskNoticeText = (row: Pick<TaskRow, 'id' | 'workerAgentId'>, outcome: TaskOutcome): string => {
-  const head = `Background task ${row.id} (${row.workerAgentId})`;
+/** A follow-up `agent.messageTask` queued for a task: what it said, and the label it carries. */
+export interface TaskFollowUp {
+  text: string;
+  trust: TrustLevel;
+}
+
+/** What the outcome says, inside the notice's brackets. */
+const outcomeText = (head: string, outcome: TaskOutcome): string => {
   switch (outcome.status) {
     case 'completed': {
       const late = outcome.stoppedBy !== undefined ? ` The stop ${stopper(outcome.stoppedBy)} came after it had finished.` : '';
-      return `[${head} completed after ${stepsText(outcome.steps)}.${late}\nResult: ${capped(outcome.reply ?? '(no reply)')}]`;
+      return `${head} completed after ${stepsText(outcome.steps)}.${late}\nResult: ${capped(outcome.reply ?? '(no reply)')}`;
     }
     case 'failed':
-      return `[${head} failed after ${stepsText(outcome.steps)}.\nError: ${capped(outcome.error ?? 'The task failed.')}]`;
+      return `${head} failed after ${stepsText(outcome.steps)}.\nError: ${capped(outcome.error ?? 'The task failed.')}`;
     case 'cancelled': {
       const by = stopper(outcome.stoppedBy ?? 'agent');
       if (outcome.why === 'never-started') {
-        return `[${head} was stopped ${by} before it started.]`;
+        return `${head} was stopped ${by} before it started.`;
       }
       return outcome.steps === 0
-        ? `[${head} was stopped ${by} before its first step finished.]`
-        : `[${head} was stopped ${by} after ${stepsText(outcome.steps)}.]`;
+        ? `${head} was stopped ${by} before its first step finished.`
+        : `${head} was stopped ${by} after ${stepsText(outcome.steps)}.`;
     }
     case 'interrupted':
       if (outcome.why === 'never-started') {
         // A restart before the turn began, or a start that failed in this
         // process (the agent gone, its provider unset): the row can't tell
         // which, and nothing of the task ran either way.
-        return `[${head} never started: its turn did not begin. It was not run.]`;
+        return `${head} never started: its turn did not begin. It was not run.`;
       }
       return outcome.why === 'lost-in-restore'
-        ? `[${head} was interrupted after ${stepsText(outcome.steps)}: its result was lost in a restore, and it was not run again.]`
-        : `[${head} was interrupted after ${stepsText(outcome.steps)}: a restart cut it off, and it was not run again.]`;
+        ? `${head} was interrupted after ${stepsText(outcome.steps)}: its result was lost in a restore, and it was not run again.`
+        : `${head} was interrupted after ${stepsText(outcome.steps)}: a restart cut it off, and it was not run again.`;
   }
+};
+
+/**
+ * The runtime notice for an outcome, from the row and the outcome, so
+ * settling after a crash builds the same text again; plus the follow-ups
+ * the task ended without reading, listed so the conversation can start a
+ * new task or tell the person. Those live in memory, so a notice a restart
+ * sends again lists none.
+ */
+export const taskNoticeText = (
+  row: Pick<TaskRow, 'id' | 'workerAgentId'>,
+  outcome: TaskOutcome,
+  unread: readonly string[] = [],
+): string => {
+  const text = outcomeText(`Background task ${row.id} (${row.workerAgentId})`, outcome);
+  if (unread.length === 0) {
+    return `[${text}]`;
+  }
+  const count = unread.length === 1 ? '1 follow-up' : `${unread.length} follow-ups`;
+  // One budget for the whole list, not one each: a task on a provider that
+  // reads none mid-task can end with any number of them.
+  const listed = capped(unread.map((followUp) => `- ${followUp}`).join('\n'));
+  return `[${text}\n${count} sent with agent.messageTask never reached it, because it ended first:\n${listed}]`;
 };
 
 /** The notice, or its fallback, on its way into the origin session. */
@@ -235,6 +261,12 @@ export interface TaskSettleHost {
   appendFallback(notice: TaskNotice): Promise<unknown>;
   /** Post the fallback to the origin conversation, once, best-effort. Rejects when the channel refused it. */
   postFallback(notice: TaskNotice): Promise<void>;
+  /**
+   * The follow-ups the task's worker ended without reading, for the notice,
+   * judged against `worker`, its session as settling read it. None when the
+   * host keeps none.
+   */
+  unreadFollowUps?(taskId: string, worker: Session | undefined): readonly TaskFollowUp[];
   /** Send a task event on the gateway's bus. */
   emit(event: TaskEvent): Promise<void>;
   now?(): string;
@@ -346,12 +378,15 @@ export const createTaskSettler = (host: TaskSettleHost) => {
       return dropped();
     }
     const quotesWorker = outcome.reply !== undefined || outcome.error !== undefined;
+    const unread = host.unreadFollowUps?.(taskId, worker) ?? [];
     const base = {
       taskId,
       sessionId: task.originSessionId,
       agentId: origin.agent.id,
-      text: taskNoticeText(task, outcome),
-      trust: quotesWorker && worker !== undefined ? sessionWriteTrust(worker) : 'agent',
+      text: taskNoticeText(task, outcome, unread.map((followUp) => followUp.text)),
+      // A follow-up it lists is the conversation's own words, under the
+      // label they were sent with.
+      trust: leastTrusted(quotesWorker && worker !== undefined ? sessionWriteTrust(worker) : 'agent', ...unread.map((followUp) => followUp.trust)),
     } satisfies Omit<TaskNotice, 'idempotencyKey'>;
     const notice = (idempotencyKey: string): TaskNotice => ({ ...base, idempotencyKey });
 
