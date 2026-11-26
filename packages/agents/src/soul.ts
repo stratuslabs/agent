@@ -48,7 +48,71 @@ export interface ParsedSoul {
    * model stays on its own default.
    */
   effort?: EffortLevel;
+  /**
+   * The model and tools this agent's conversation turns run on, when the
+   * soul has a `front:` block. See {@link SoulFront}. Absent means every
+   * turn runs on the agent's own model and tools, as before the key existed.
+   */
+  front?: SoulFront;
 }
+
+/**
+ * A soul's `front:` block: what answers a person who is waiting. Turns in a
+ * conversation (a channel message, `stratus chat`, a task's outcome notice)
+ * run on `model` with the front tools, so a quick question gets a quick
+ * answer and longer work goes to a background task on the agent itself.
+ * Schedules, triggers and task workers keep the agent's own model and tools.
+ */
+export interface SoulFront {
+  /** The model conversation turns run on (`claude-haiku-5-5`). Required: there is no hidden default. */
+  model: string;
+  /** The provider serving `model`. Omitted is the agent's own. */
+  provider?: string;
+  /**
+   * Replaces the default quick set the front gets beside the task tools.
+   * Same entries as the soul's `tools:`, and never a grant: a tool the
+   * agent's own `tools:` does not allow stays out of the front's reach.
+   */
+  tools?: string[];
+}
+
+/**
+ * What a front always has, beside its quick set: starting work in the
+ * background, seeing it and stopping it, and passing a follow-up to it.
+ * The last is named before it exists so a soul written today reaches it the
+ * day it ships; a name nothing registered grants nothing. Literals, not the
+ * tools' name constants: `tools/delegate.ts` imports this file, and a cycle
+ * read at module load is a crash that depends on import order. A test holds
+ * them equal.
+ */
+export const FRONT_TASK_TOOLS: readonly string[] = [
+  'agent.delegate',
+  'agent.tasks',
+  'agent.cancelTask',
+  'agent.messageTask',
+];
+
+/**
+ * The quick set a front gets when `front.tools` names none: reads, memory
+ * and messages, each answered in moments. No writes, no shell, no web: a
+ * front and a task writing one file is the failure that is hard to see, and
+ * a slow tool holds the conversation it exists to keep moving.
+ */
+export const DEFAULT_FRONT_TOOLS: readonly string[] = [
+  'memory.recall',
+  'memory.remember',
+  'message.read',
+  'message.send',
+  'fs.read',
+  'fs.list',
+  'fs.search',
+];
+
+/** Every tool entry a front turn is held to, before the agent's own `tools:` narrows it further. */
+export const frontToolEntries = (front: SoulFront): string[] => [
+  ...FRONT_TASK_TOOLS,
+  ...(front.tools ?? DEFAULT_FRONT_TOOLS),
+];
 
 export interface ParseSoulOptions {
   /** Seed for deterministic identity generation when the soul has no name. */
@@ -58,6 +122,70 @@ export interface ParseSoulOptions {
 const SOUL_SCALAR_KEYS = ['name', 'id', 'provider', 'model', 'listens', 'language', 'effort'] as const;
 
 const SOUL_LIST_KEYS = ['tools', 'skills', 'credentials', 'delegates'] as const;
+
+const FRONT_SCALAR_KEYS = ['model', 'provider'] as const;
+
+const FRONT_LIST_KEYS = ['tools'] as const;
+
+/**
+ * The frontmatter lines with a top-level `front:` block taken out, and that
+ * block's lines dedented so the shared parser reads them as a document of
+ * their own. The dialect has no nested maps, and `front:` is the one soul
+ * key that needs one; reading it here keeps the block as strict as the rest
+ * of the soul, where an unknown key is refused rather than skipped.
+ */
+const takeFrontBlock = (lines: string[]): { rest: string[]; front: string[] | undefined } => {
+  const rest: string[] = [];
+  let front: string[] | undefined;
+  let inFront = false;
+  for (const line of lines) {
+    const opener = /^front\s*:(.*)$/.exec(line);
+    if (opener) {
+      if (front !== undefined) {
+        throw new Error('Soul frontmatter has more than one front: block.');
+      }
+      const inline = (opener[1] ?? '').trim();
+      if (inline.length > 0 && !inline.startsWith('#')) {
+        throw new Error(
+          `Soul frontmatter front: must be a block of indented lines, like "front:" then "  model: claude-haiku-5-5": "${line.trim()}"`,
+        );
+      }
+      front = [];
+      inFront = true;
+      continue;
+    }
+    if (inFront && (line.trim().length === 0 || /^\s/.test(line))) {
+      front?.push(line);
+      continue;
+    }
+    inFront = false;
+    rest.push(line);
+  }
+  if (front === undefined) {
+    return { rest, front: undefined };
+  }
+  const indents = front.filter((line) => line.trim().length > 0).map((line) => line.length - line.trimStart().length);
+  const indent = indents.length > 0 ? Math.min(...indents) : 0;
+  return { rest, front: front.map((line) => line.slice(Math.min(indent, line.length - line.trimStart().length))) };
+};
+
+const parseFront = (lines: string[]): SoulFront => {
+  const { scalars, lists } = parseFrontmatterLines(lines, {
+    kind: 'soul front:',
+    scalarKeys: FRONT_SCALAR_KEYS,
+    listKeys: FRONT_LIST_KEYS,
+  });
+  if (scalars.model === undefined) {
+    throw new Error(
+      'Soul frontmatter front: has no model. Name the model conversation turns run on, like "  model: claude-haiku-5-5".',
+    );
+  }
+  return {
+    model: scalars.model,
+    ...(scalars.provider !== undefined ? { provider: scalars.provider } : {}),
+    ...(lists.tools !== undefined ? { tools: lists.tools } : {}),
+  };
+};
 
 /**
  * The soul edit that grants one delegate, as the refusal suggests it. The
@@ -90,9 +218,11 @@ export const suggestedDelegatesEdit = (value: string): string => {
  */
 export const parseSoul = (source: string, options: ParseSoulOptions = {}): ParsedSoul => {
   const { lines, body } = extractFrontmatter(source, 'soul');
-  const { scalars, lists } = lines
-    ? parseFrontmatterLines(lines, { kind: 'soul', scalarKeys: SOUL_SCALAR_KEYS, listKeys: SOUL_LIST_KEYS })
+  const split = lines ? takeFrontBlock(lines) : undefined;
+  const { scalars, lists } = split
+    ? parseFrontmatterLines(split.rest, { kind: 'soul', scalarKeys: SOUL_SCALAR_KEYS, listKeys: SOUL_LIST_KEYS })
     : { scalars: {}, lists: {}, maps: {}, unknownKeys: [], skippedMapEntries: {} } as ParsedFrontmatter;
+  const front = split?.front !== undefined ? parseFront(split.front) : undefined;
 
   const instructions = body.trim();
 
@@ -139,6 +269,7 @@ export const parseSoul = (source: string, options: ParseSoulOptions = {}): Parse
     ...(scalars.model ? { model: scalars.model } : {}),
     ...(isLanguageTag(scalars.language) ? { language: scalars.language } : {}),
     ...(isEffortLevel(scalars.effort) ? { effort: scalars.effort } : {}),
+    ...(front !== undefined ? { front } : {}),
   };
 };
 
@@ -159,6 +290,24 @@ export const formatSoul = (soul: ParsedSoul): string => {
   }
   if (soul.effort) {
     lines.push(`effort: ${soul.effort}`);
+  }
+  if (soul.front) {
+    lines.push('front:', `  model: ${writeScalar(soul.front.model)}`);
+    if (soul.front.provider) {
+      lines.push(`  provider: ${writeScalar(soul.front.provider)}`);
+    }
+    if (soul.front.tools !== undefined) {
+      // Kept when empty, like the soul's own tools: an empty list is the
+      // task tools alone, and an omitted one adds the default quick set.
+      if (soul.front.tools.length === 0) {
+        lines.push('  tools: []');
+      } else {
+        lines.push('  tools:');
+        for (const tool of soul.front.tools) {
+          lines.push(`    - ${writeScalar(tool)}`);
+        }
+      }
+    }
   }
   for (const [key, values] of [
     ['tools', soul.agent.tools],
