@@ -802,6 +802,25 @@ test('config file errors are typed and preserve the underlying fs code', async (
   );
 });
 
+test('the configured soul resolves from a preset config snapshot without reading a file', async () => {
+  const { resolveConfiguredSoul } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-preset-soul-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-preset-soul-proj-'));
+  const env = { homeDir: home, cwd: project, processEnv: {} };
+  const soulPath = path.join(home, 'bob.md');
+  await writeFile(soulPath, '---\nname: Bob\n---\n\nYou are Bob.\n');
+  // What discovery would find here is a file that won't load, and the
+  // global config names nobody: only the snapshot can answer.
+  await writeFile(path.join(project, 'stratus.config.json'), '{ broken');
+
+  const trusted = await resolveConfiguredSoul({ presetConfig: { config: { soul: soulPath }, trusted: true, path: '/snapshot.json' } }, env);
+  assert.equal(trusted?.soul.agent.id, 'bob');
+  assert.equal(trusted?.path, soulPath);
+  // The snapshot's trust flag is honored as discovery's would be.
+  assert.equal(await resolveConfiguredSoul({ presetConfig: { config: { soul: soulPath }, trusted: false, path: '/snapshot.json' } }, env), undefined);
+  assert.equal(await resolveConfiguredSoul({ presetConfig: { config: {}, trusted: true } }, env), undefined);
+});
+
 test('an auto-found project config that cannot be used is skipped for the trusted one; a named one still fails', async () => {
   const { discoverConfigLocation, resolveConfigLocation, resolveRuntimeConfig, ConfigFileError } = await import('../src/index.ts');
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skip-home-'));
