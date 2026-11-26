@@ -818,6 +818,8 @@ test('a turn queued behind a running one does not overwrite its status', async (
 
   // The thread says what the running turn is doing, not what the queued one would.
   assert.equal(statuses.at(-1)?.status, 'is running shell.run…');
+  // A thread's status already has one key; the queued message moves nothing.
+  assert.ok(statuses.every((entry) => entry.thread_ts === '100.1' && entry.status !== ''), JSON.stringify(statuses));
   releaseFirst();
   await ticks();
   releaseSecond();
@@ -826,10 +828,11 @@ test('a turn queued behind a running one does not overwrite its status', async (
   assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
 });
 
-test('a DM queued behind a running turn shows its own status at once', async () => {
-  // Every DM message is its own status key, and Slack stops showing the
-  // running turn's once a newer message sits below it. A queued DM that
-  // published nothing left the agent looking idle until the first reply.
+test('messages queued behind a running DM turn share one status, on the newest message', async () => {
+  // Every DM message is its own status key, so one status each stacked a
+  // "Thinking…" under every message sent while a long tool ran. The
+  // conversation's one status moves to the newest message instead, saying
+  // what the running turn is doing, until the last reply posts.
   const socket = createFakeSocket();
   const web = createFakeWeb('B-AVA', 'T1');
   const statuses = recordStatuses(web);
@@ -837,17 +840,31 @@ test('a DM queued behind a running turn shows its own status at once', async () 
   const firstGate = new Promise<void>((resolve) => {
     releaseFirst = resolve;
   });
+  let releaseRest!: () => void;
+  const restGate = new Promise<void>((resolve) => {
+    releaseRest = resolve;
+  });
   const gateway: StubGateway = createStubGateway(async ({ sessionId, userMessage }) => {
     if (/first/.test(userMessage)) {
+      await gateway.bus.emit({ type: 'tool.called', sessionId, call: { id: 'c1', toolName: 'shell.run', input: {} } });
       await firstGate;
       return sessionWithReply(sessionId, 'first answer');
     }
-    return sessionWithReply(sessionId, 'second answer');
+    await restGate;
+    return sessionWithReply(sessionId, `${userMessage} answer`);
   });
   const ticks = async (): Promise<void> => {
     for (let tick = 0; tick < 50; tick += 1) {
       await new Promise((resolve) => setImmediate(resolve));
     }
+  };
+  // What Slack shows: each key's last status, where it is not cleared.
+  const shown = (): Array<[string, string]> => {
+    const last = new Map<string, string>();
+    for (const entry of statuses) {
+      last.set(entry.thread_ts, entry.status);
+    }
+    return [...last].filter(([, status]) => status !== '');
   };
 
   const adapter = createAdapterAsShipped({
@@ -857,22 +874,27 @@ test('a DM queued behind a running turn shows its own status at once', async () 
     createWebClient: () => web,
   });
   await adapter.start(gateway);
-  const first = socket.deliver('message', mention('first', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }));
+  const deliveries = [socket.deliver('message', mention('first', { type: 'message', ts: '300.1', channel: 'D1', channel_type: 'im' }))];
   await ticks();
-  const second = socket.deliver('message', mention('second', { type: 'message', ts: '300.2', channel: 'D1', channel_type: 'im' }));
-  await ticks();
+  assert.deepEqual(shown(), [['300.1', 'is running shell.run…']]);
+  for (const [index, word] of ['second', 'third', 'fourth', 'fifth'].entries()) {
+    const ts = `300.${index + 2}`;
+    deliveries.push(socket.deliver('message', mention(word, { type: 'message', ts, channel: 'D1', channel_type: 'im' })));
+    await ticks();
+    assert.deepEqual(shown(), [[ts, 'is running shell.run…']], `after ${word}`);
+  }
 
-  assert.deepEqual(
-    statuses.filter((entry) => entry.status !== ''),
-    [
-      { channel_id: 'D1', thread_ts: '300.1', status: 'is thinking…', loading_messages: ['Thinking…'] },
-      { channel_id: 'D1', thread_ts: '300.2', status: 'is thinking…', loading_messages: ['Thinking…'] },
-    ],
-  );
   releaseFirst();
-  await Promise.all([first, second]);
+  await ticks();
+  // The first reply posted, and the turns still waiting keep the one status.
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer']);
+  assert.deepEqual(shown(), [['300.5', 'is thinking…']]);
+
+  releaseRest();
+  await Promise.all(deliveries);
   await adapter.stop();
-  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer']);
+  assert.deepEqual(web.posts.map((post) => post.text), ['first answer', 'second answer', 'third answer', 'fourth answer', 'fifth answer']);
+  assert.deepEqual(shown(), []);
 });
 
 test('a top-level DM reply takes down the loading status it was answered under', async () => {
