@@ -246,6 +246,7 @@ import {
   drainSharedMemory,
   hasBracketedLegacyStateIn,
   createRuntimeProvider,
+  createFallbackWrappedProvider,
   describeServingModel,
   isRegisteredProviderName,
   loadChannelTransportSecrets,
@@ -1611,7 +1612,13 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // reads the agent's memory; no skill catalog, so its prompt is its
   // instruction and its tools; and grants nothing to every agent, since
   // the credential request asks a person.
-  const runnerFor = (config: RuntimeConfig, agentId: string, subAgent = false, front = false): AgentRunner => {
+  /**
+   * `main` is set for a front turn (a soul's `front:`, with `config` the
+   * front's runtime): the agent's own runtime, which answers any call the
+   * front model fails, that call only.
+   */
+  const runnerFor = (config: RuntimeConfig, agentId: string, subAgent = false, main?: RuntimeConfig): AgentRunner => {
+    const front = main !== undefined;
     // The budget is a provider-construction input too (the harness
     // runtimes take it as their inner limit), so it is part of the key:
     // two agents on one model with different budgets get their own runners.
@@ -1622,7 +1629,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // where it got to, as any turn at its cap does.
     const maxTurns = front ? Math.min(FRONT_MAX_STEPS, agentMaxTurns ?? FRONT_MAX_STEPS) : agentMaxTurns;
     const autoContinue = front ? undefined : options.autoContinueFor?.(agentId);
-    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}:${autoContinue ?? 'off'}${subAgent ? ':sub' : ''}${front ? ':front' : ''}`;
+    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}:${autoContinue ?? 'off'}${subAgent ? ':sub' : ''}${main !== undefined ? `:front:${runnerKeyFor(main)}` : ''}`;
     const existing = runners.get(key);
     if (existing) {
       return existing;
@@ -1634,22 +1641,24 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     let hostedRunner: AgentRunner | undefined;
     // One set for both places a provider's error text leaves the runner:
     // the switch warning below and a failed turn.
-    const secretsOf = async (session: Session): Promise<string[]> => [...runtimeKeysOf(config), ...await failureSecrets(session)];
-    const provider = createRuntimeProvider(
-      config,
+    const keysOf = (): string[] => [...runtimeKeysOf(config), ...(main !== undefined ? runtimeKeysOf(main) : [])];
+    const secretsOf = async (session: Session): Promise<string[]> => [...keysOf(), ...await failureSecrets(session)];
+    const executeHosted = async (session: Session, call: Parameters<AgentRunner['executeHostedToolCall']>[1], context: Parameters<AgentRunner['executeHostedToolCall']>[2]) => {
+      if (!hostedRunner) {
+        throw new Error('The Stratus runtime is not ready to execute tools yet.');
+      }
+      return hostedRunner.executeHostedToolCall(session, call, context);
+    };
+    const ownProvider = (own: RuntimeConfig) => createRuntimeProvider(
+      own,
       async (error, session) => {
         // Masked like a failed turn's text, since the primary's error can
         // quote any stored secret. When the store can't be read, the
         // runtime's own keys are still masked.
-        const secrets = await secretsOf(session).catch(() => runtimeKeysOf(config));
+        const secrets = await secretsOf(session).catch(() => keysOf());
         warn(`default model failed (${redactSecrets(error instanceof Error ? error.message : String(error), secrets)}); using the fallback model`);
       },
-      async (session, call, context) => {
-        if (!hostedRunner) {
-          throw new Error('The Stratus runtime is not ready to execute tools yet.');
-        }
-        return hostedRunner.executeHostedToolCall(session, call, context);
-      },
+      executeHosted,
       maxTurns,
       // The sticky-fallback switch is durable the moment it happens, not
       // when the turn's next save lands — a daemon killed mid-fallback
@@ -1657,6 +1666,22 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       (session) => store.save(session),
       providerContributions,
     );
+    // A front answers on its own model, and a call that model fails is
+    // answered by the agent's own (and its configured fallback behind it),
+    // for that call only: the next tries the front again. Slower, but the
+    // conversation still gets its answer. Logged by the error's name alone:
+    // a provider's message can quote the conversation.
+    const provider = main !== undefined
+      ? createFallbackWrappedProvider(
+        createRuntimeProvider(config, undefined, executeHosted, maxTurns, undefined, providerContributions),
+        ownProvider(main),
+        (error) => {
+          warn(`${agentId}: the front model failed (${error instanceof Error ? error.name : 'unknown error'}); this call answers on the agent's own model`);
+        },
+        undefined,
+        { perCall: true },
+      )
+      : ownProvider(config);
 
     const runner = new AgentRunner({
       provider,

@@ -49,7 +49,7 @@ export interface TurnDispatchDeps {
     metadata: JsonObject | undefined,
     subAgent?: boolean,
   ) => AgentRuntimeContext;
-  runnerFor: (config: RuntimeConfig, agentId: string, subAgent?: boolean, front?: boolean) => AgentRunner;
+  runnerFor: (config: RuntimeConfig, agentId: string, subAgent?: boolean, main?: RuntimeConfig) => AgentRunner;
   withWatchdog: <T>(
     sessionId: string,
     agentId: string,
@@ -171,8 +171,11 @@ export const createTurnDispatch = ({
       );
     }
 
-    const config = front !== undefined ? await frontRuntimeFor(source, front) : await runtimeForAgent(source);
-    const runner = runnerFor(config, source.definition.id, subAgent !== undefined, front !== undefined);
+    // A front turn resolves both: the front's runtime it runs on, and the
+    // agent's own, which answers a call the front model fails.
+    const main = await runtimeForAgent(source);
+    const config = front !== undefined ? await frontRuntimeFor(source, front) : main;
+    const runner = runnerFor(config, source.definition.id, subAgent !== undefined, front !== undefined ? main : undefined);
     // Which executor the turn's tool calls run through — the built-in
     // under the name `stratus run` has always recorded, a contributed one
     // under its registered name — so a transcript says where a command

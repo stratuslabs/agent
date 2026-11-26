@@ -255,10 +255,22 @@ export const createFallbackWrappedProvider = (
   fallback: ModelProvider,
   onFallback: FallbackNotice,
   persistSession?: (session: Session) => Promise<void>,
+  options: {
+    /**
+     * Fall back for the one call that failed, and try the primary again on
+     * the next, with nothing recorded on the session. A soul's `front:`
+     * falls back to the agent's own model this way: a conversation whose
+     * fast model hit one rate limit should be fast again on the next turn,
+     * not on the slow model for good. Every other rule here (what is not a
+     * failure, the reset, the guard asked about the fallback) is the same.
+     */
+    perCall?: boolean;
+  } = {},
 ): ModelProvider => {
+  const perCall = options.perCall === true;
   const fallbackSessions = new Set<string>();
-  const switchedTo = (session: Session): boolean => session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
-    || fallbackSessions.has(session.id);
+  const switchedTo = (session: Session): boolean => !perCall && (session.metadata?.[FALLBACK_ACTIVE_METADATA_KEY] === true
+    || fallbackSessions.has(session.id));
   // Either side may itself route to another model and say which.
   const answering = (provider: ModelProvider, session: Session): string => provider.nameFor?.(session) ?? provider.name;
 
@@ -324,8 +336,10 @@ export const createFallbackWrappedProvider = (
           if (error instanceof HostRefusalError) {
             throw error;
           }
-          fallbackSessions.add(request.session.id);
-          (request.session.metadata ??= {})[FALLBACK_ACTIVE_METADATA_KEY] = true;
+          if (!perCall) {
+            fallbackSessions.add(request.session.id);
+            (request.session.metadata ??= {})[FALLBACK_ACTIVE_METADATA_KEY] = true;
+          }
           // Awaited, so a host that masks the error first (the daemon reads
           // its stored secrets) has said so before the fallback answers. A
           // notice that fails is not a model failure: the switch stands.
@@ -339,7 +353,7 @@ export const createFallbackWrappedProvider = (
           // the primary on restart — stickiness is the contract.
           // Best-effort: if the save itself fails, the in-memory
           // stickiness still covers this process's lifetime.
-          if (persistSession) {
+          if (persistSession && !perCall) {
             try {
               await persistSession(request.session);
             } catch {

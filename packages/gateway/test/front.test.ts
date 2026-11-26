@@ -250,6 +250,47 @@ test('an agent without front: runs a DM turn on its own model and tools, as befo
   assert.equal(systemOf(captured[0]).includes(FRONT_NOTE), false);
 });
 
+test('when the front model fails, that call answers on the agent\'s own model, the log says so without the conversation, and the next turn tries the front again', async () => {
+  const home = await homeWith(AVA_WITH_FRONT);
+  const captured: CapturedRequest[] = [];
+  let frontDown = true;
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as CapturedRequest;
+    captured.push(body);
+    if (body.model === 'front-model' && frontDown) {
+      // A provider's error can quote the request, the person's words included.
+      return new Response(JSON.stringify({ error: { message: `no such model; request was: ${lastUserOf(body)}` } }), {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+    return text(`answered by ${body.model}`);
+  }) as typeof fetch;
+  const warnings: string[] = [];
+  const env = { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, log: () => {}, warn: (line: string) => warnings.push(line) });
+  await gateway.start();
+  let first;
+  let second;
+  try {
+    first = await gateway.dispatch({ sessionId: 'front-down', agentId: 'ava', userMessage: 'my PIN is 4321' });
+    frontDown = false;
+    second = await gateway.dispatch({ sessionId: 'front-down', agentId: 'ava', userMessage: 'and now?' });
+  } finally {
+    await gateway.stop();
+  }
+  assert.deepEqual(captured.map((request) => request.model), ['front-model', 'main-model', 'front-model']);
+  assert.equal(first.messages.at(-1)?.content, 'answered by main-model');
+  assert.equal(second.messages.at(-1)?.content, 'answered by front-model');
+  // The main model answering a front turn still holds only the front tools.
+  assert.deepEqual(toolsOf(captured[1]), toolsOf(captured[0]));
+  const said = warnings.filter((line) => line.includes('the front model failed'));
+  assert.equal(said.length, 1, warnings.join('\n'));
+  assert.equal(warnings.some((line) => line.includes('4321')), false, warnings.join('\n'));
+  // Nothing sticky: the session was never switched to a fallback.
+  assert.equal(second.metadata?.fallbackActive, undefined);
+});
+
 for (const [agentCap, steps] of [[undefined, FRONT_MAX_STEPS], [3, 3]] as const) {
   test(`a front turn that keeps calling tools wraps up after ${steps} steps${agentCap !== undefined ? ', the agent\'s lower cap winning' : ''}`, async () => {
     const home = await homeWith(AVA_WITH_FRONT);
