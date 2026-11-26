@@ -350,7 +350,7 @@ test('a front turn delivered again under its key passes its follow-up once', asy
 
 const AVA = { id: 'ava', name: 'Ava', instructions: '', tools: [], skills: [], delegates: [] } as unknown as AgentDefinition;
 
-const hostFixture = async () => {
+const hostFixture = async ({ holdAfterFinish = false }: { holdAfterFinish?: boolean } = {}) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-task-message-host-'));
   const stateDir = path.join(home, '.stratus');
   await mkdir(stateDir, { recursive: true });
@@ -366,6 +366,8 @@ const hostFixture = async () => {
   let steer: ((signal: AbortSignal) => Promise<SteeredMessage | undefined>) | undefined;
   let finish: () => void = () => {};
   const finished = new Promise<void>((resolve) => { finish = resolve; });
+  let release: () => void = () => {};
+  const released = holdAfterFinish ? new Promise<void>((resolve) => { release = resolve; }) : Promise.resolve();
   const chains = new Map<string, Promise<unknown>>();
   const onChain = <T>(sessionId: string, work: () => Promise<T>): Promise<T> => {
     const next = (chains.get(sessionId) ?? Promise.resolve()).then(work, work);
@@ -398,6 +400,8 @@ const hostFixture = async () => {
       worker.messages.push({ id: 'w2', role: 'assistant', content: 'done', createdAt: '' });
       worker.status = 'completed';
       await store.save(worker);
+      // Finished and saved, but its dispatch not yet back: not settled.
+      await released;
       return worker;
     },
     onSessionChain: onChain,
@@ -426,10 +430,13 @@ const hostFixture = async () => {
     origin,
     steer: (signal = new AbortController().signal) => steer!(signal),
     finish,
+    release: () => release(),
+    workerDone: () => until('the worker turn to finish', async () => (await store.get(rows.get(started.task)!.workerSessionId))?.status === 'completed'),
     settled: () => until('the task to settle', () => rows.get(started.task)?.delivery === 'delivered'),
     notice: async () => (await store.get(origin))?.messages.find((entry) => carriesKey(entry, taskOutcomeKey(started.task)))?.content ?? '',
     async close() {
       finish();
+      release();
       await Promise.allSettled([...chains.values()]);
       rows.close();
       tasks.close();
@@ -486,6 +493,21 @@ test('the host refuses another agent\'s task, another conversation, and an unkno
     await f.tasks.cancel(f.task, { stoppedBy: 'cli' });
     assert.deepEqual(await f.tasks.toolsHost!.message(base), { kind: 'stopping' });
     assert.equal(await f.steer(), undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a task whose turn has ended takes nothing, even before it is settled', async () => {
+  const f = await hostFixture({ holdAfterFinish: true });
+  try {
+    f.finish();
+    await f.workerDone();
+    const answer = await f.tasks.toolsHost!.message({ taskId: f.task, agentId: 'ava', originSessionId: f.origin, text: 'too late', trust: 'agent' });
+    assert.deepEqual(answer, { kind: 'ended', status: 'completed' }, 'how it ended, from the worker, though the row still says running');
+    f.release();
+    await f.settled();
+    assert.doesNotMatch(await f.notice(), /too late/, 'it was refused, not queued and listed');
   } finally {
     await f.close();
   }

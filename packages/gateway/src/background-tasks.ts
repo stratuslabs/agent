@@ -631,9 +631,9 @@ export const createBackgroundTasks = ({
 
   /**
    * What `agent.tasks`, `agent.cancelTask` and `agent.messageTask` reach,
-   * scoped to the calling agent. A listed task's status is read live from its worker session
-   * (`liveTaskStatus`): the row learns a parked worker or a finished turn
-   * only when settling runs.
+   * scoped to the calling agent. A listed task's status is read live from
+   * its worker session (`liveTaskStatus`): the row learns a parked worker
+   * or a finished turn only when settling runs.
    */
   const toolsHost: TaskToolsHost = {
     async list(agentId) {
