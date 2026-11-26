@@ -72,7 +72,12 @@ with piped input. To change it later, edit `approvals.posture`; see
   retries on the fallback — even across providers.
 - **Agent** — name your agent (or accept a generated identity), describe
   their personality, and their soul file lands in `~/.stratus/agents/`, ready
-  to edit. See [Agents](../concepts/agents.md) for what a soul is.
+  to edit. See [Agents](../concepts/agents.md) for what a soul is. No agent
+  is defined in code, so on a new install setup makes your first one before
+  anything that needs it (Channels, the test run, Save & finish) if you
+  haven't: it asks for a name, Enter keeps Stratus, and writes a soul with
+  every tool, set as your default. Piped into setup, it is named Stratus
+  without the question, so a script's answers still line up.
 - **Plugins** — what your agents *can* do. The list shows each first-party
   package as installed, enabled, or neither; picking one installs it with
   `npm install -g` and enables it in the same step, writing the `plugins`
@@ -125,8 +130,8 @@ with piped input. To change it later, edit `approvals.posture`; see
 
   Enabling is only the second of the two gates — the soul's `tools:` list is
   the other, and setup does not edit souls. What it prints depends on which
-  it is: a soul with **no** `tools:` list is allowlisted for every registered
-  tool, and the built-in `stratus` agent has none, so on a fresh install
+  it is: a soul with `tools: ["*"]` is allowlisted for every registered tool,
+  and the first agent setup creates is written that way, so on a fresh install
   enabling a plugin makes its tools callable at the next daemon start and
   setup says exactly that, naming the agents — except where it has just
   said it did not check something the plugin needs, as for `tool-browser`
@@ -322,10 +327,8 @@ What it changes, and what it does not:
   sign-in, and the `ANTHROPIC_API_KEY` / `STRATUS_API_KEY` environment
   keys, for that agent and no other. Agents without one resolve exactly as
   before.
-- **Only an agent with a soul file.** The built-in `stratus` agent has
-  none, so its turns always run on the shared sign-in and `signin set`
-  refuses it. A configured default soul that takes the `stratus` id over
-  does have one, and can have its own sign-in.
+- **Only an agent on the roster.** `signin set` refuses an id no soul
+  declares.
 - **Only when Anthropic serves it.** An agent whose soul pins another
   provider ignores the entry. An Anthropic fallback model uses the agent's
   own sign-in too; a fallback on another provider is not used for that

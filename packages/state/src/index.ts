@@ -303,7 +303,8 @@ export {
 } from './config-location.ts';
 
 export {
-  DEFAULT_STRATUS_AGENT,
+  LEGACY_DEFAULT_AGENT_ID,
+  stratusPersona,
   EVERY_TOOL,
   resolveSoulPath,
   resolveSoul,

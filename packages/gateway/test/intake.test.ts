@@ -14,8 +14,9 @@ import {
   type Gateway,
   type GatewayChannelAdapter,
 } from '../src/index.ts';
+import { withDefaultAgent } from './default-agent.ts';
 
-const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-intake-'));
+const newHome = async (): Promise<string> => withDefaultAgent(await mkdtemp(path.join(os.tmpdir(), 'stratus-intake-')));
 
 test('a paused gateway refuses new work with its message, and finishes the turn already running', async () => {
   const home = await newHome();

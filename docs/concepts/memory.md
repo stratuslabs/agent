@@ -451,8 +451,7 @@ revision travels with it. Forgotten entries stay behind: a tombstone is a
 record, and a file of entries has nowhere to put one, so exporting them
 would resurrect facts the agent dropped.
 
-**Export refuses when one entry id is held twice.** The built-in `stratus`
-agent inherits the memories older builds wrote under `demo-agent`,
+**Export refuses when one entry id is held twice.** The `stratus` agent (built in before, a soul since) inherits the memories older builds wrote under `demo-agent`,
 `anthropic-agent`, and `openai-agent`, and a hand edit — or one corpus
 imported for both — can put the same id under its own id and under an
 inherited one. Every read shows the current copy and hides the inherited

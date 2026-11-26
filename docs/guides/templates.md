@@ -118,8 +118,8 @@ review the operator is reading.
 - **It will not install two agents with one id.** Ids key sessions, memory,
   and credentials, and a duplicate makes the whole roster refuse to load —
   so a soul claiming an id anything already holds is skipped and named.
-  That set is your roster, the `soul:` your config points at even when it
-  lives outside `~/.stratus/agents`, and the built-in `stratus`. `--force`
+  That set is your roster and the `soul:` your config points at, even when
+  it lives outside `~/.stratus/agents`. `--force`
   does not override it: `--force` replaces the file of the same name, which
   is a different thing.
 - **What you reviewed is what installs.** The template is copied to a

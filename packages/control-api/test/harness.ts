@@ -70,7 +70,21 @@ export const rawGet = (
     request.end();
   });
 
-export const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-api-'));
+/**
+ * A home with one agent, `stratus`, as the configured default: what setup
+ * leaves, and what an upgrade writes for a home that used the agent that
+ * once lived in code. `bareHome` has no agent at all.
+ */
+export const STRATUS_SOUL = '---\nname: Stratus\nid: stratus\ntools: ["*"]\n---\n\nYou are Stratus, a personal agent on the Stratus Agent platform.\n';
+export const bareHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-api-'));
+export const newHome = async (): Promise<string> => {
+  const home = await bareHome();
+  const dir = path.join(home, '.stratus', 'agents');
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'stratus.md'), STRATUS_SOUL);
+  await writeFile(path.join(home, '.stratus', 'config.json'), `${JSON.stringify({ soul: path.join(dir, 'stratus.md') })}\n`);
+  return home;
+};
 
 export const writeSoul = async (home: string, file: string, contents: string): Promise<void> => {
   const dir = path.join(home, '.stratus', 'agents');

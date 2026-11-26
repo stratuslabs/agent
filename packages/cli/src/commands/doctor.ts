@@ -5,7 +5,6 @@ import {
   AGENTS_FOLDER_RECORD,
   planAgentsHome,
   defaultApiKeyEnvName,
-  DEFAULT_STRATUS_AGENT,
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
@@ -245,6 +244,7 @@ interface DaemonHealth {
   startedAt?: string;
   startup?: { warnings?: unknown; configs?: unknown };
   intake?: { paused?: unknown; unreadable?: unknown };
+  agents?: unknown;
 }
 
 const VALUE_TYPE_PHRASE = {
@@ -299,6 +299,13 @@ const ignoredConfigKeyProblems = async (configPath: string): Promise<string[]> =
  * a restart would only read the same broken one and pause again.
  */
 const INTAKE_WARNING_PREFIX = 'intake: ';
+/**
+ * How the gateway's start-up line for an empty roster begins. Judged by what
+ * the daemon serves now (`agents` in /health), not by the files: making an
+ * agent does not reload a running daemon, so a soul on disk can still leave
+ * it serving nobody. Once it serves one the line is history.
+ */
+const NO_AGENTS_WARNING_PREFIX = 'no agents yet: ';
 
 /** What a daemon's /health said about each config file at start, keeping only well-formed entries. */
 const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | null }> =>
@@ -309,7 +316,7 @@ const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | nu
       })
     : [];
 
-const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<DoctorDaemon> => {
+const inspectDaemon = async (env: CliEnvironment, problems: string[], agentsOnDisk: boolean): Promise<DoctorDaemon> => {
   // Read here rather than through readGatewayInfo, which folds a damaged
   // file into "none": only a missing file is the benign case.
   const infoPath = gatewayInfoPath(env);
@@ -381,6 +388,19 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   for (const line of warnings) {
     // A note under Daemon, not a problem: see EXPOSED_API_WARNING_PREFIX.
     if (line.startsWith(EXPOSED_API_WARNING_PREFIX)) {
+      continue;
+    }
+    if (line.startsWith(NO_AGENTS_WARNING_PREFIX)) {
+      // This build always reports the agents it serves; a daemon that
+      // printed this line is this build.
+      const served = Array.isArray(health.agents) ? health.agents.length : 0;
+      if (served === 0) {
+        problems.push(agentsOnDisk
+          ? 'The running daemon started with no agents and has not loaded any since. '
+            + 'Run `stratus restart` so it serves the ones you made.'
+          : 'No agents yet, so the running daemon fails every turn it is handed. '
+            + 'Create one with `stratus setup` or `stratus agent new`.');
+      }
       continue;
     }
     if (line.startsWith(INTAKE_WARNING_PREFIX)) {
@@ -900,7 +920,6 @@ export const collectDoctorReport = async (
     problems.push(error instanceof Error ? error.message : String(error));
   }
   const rosterIds = new Set(rosterEntries.map((entry) => entry.soul.agent.id));
-  rosterIds.add(DEFAULT_STRATUS_AGENT.id);
   if (soul) {
     rosterIds.add(soul.agent.id);
   }
@@ -1070,7 +1089,9 @@ export const collectDoctorReport = async (
     );
   }
 
-  const daemon = await inspectDaemon(env, problems);
+  // A roster that would not load is already a problem above, and no
+  // evidence that there are no agents.
+  const daemon = await inspectDaemon(env, problems, rosterIds.size > 0 || !rosterLoaded);
   // With no daemon answering, a stopped service is the finding the rest
   // wait on, so it goes first. A doctor run on a host whose daemon was down
   // led with a stray-souls warning instead.
@@ -1136,7 +1157,7 @@ export const runDoctor = async (
     // describe a run that cannot happen.
     writeLine(streams.stdout, `  ${'agent'.padEnd(10)}unresolved — the configured soul could not be read`);
   } else {
-    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}${DEFAULT_STRATUS_AGENT.name} (built-in — no soul configured)`);
+    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}none — no default soul is set. \`stratus setup\` creates your first agent`);
   }
 
   writeLine(streams.stdout);

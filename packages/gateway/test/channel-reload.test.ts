@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createGateway, type Gateway, type GatewayChannelAdapter } from '../src/index.ts';
+import { withDefaultAgent } from './default-agent.ts';
 
-const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-channel-reload-'));
+const newHome = async (): Promise<string> => withDefaultAgent(await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-channel-reload-')));
 
 const writeSoul = async (home: string, id: string): Promise<void> => {
   const dir = path.join(home, '.stratus', 'agents');

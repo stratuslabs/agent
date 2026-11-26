@@ -201,9 +201,11 @@ test('an unreadable ChatGPT sign-in file refuses an inferred run instead of gues
 
 test('the agent listing shows an unpinned agent running on the only sign-in, ChatGPT', async () => {
   const home = await homeWith({ signIn: signedIn() });
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
   const summaries = await listAgentSummaries(envFor(home));
-  const builtIn = summaries.find((entry) => entry.builtIn);
-  assert.deepEqual(builtIn?.runsOn, { provider: 'chatgpt', model: DEFAULT_CHATGPT_MODEL });
+  const ava = summaries.find((entry) => entry.id === 'ava');
+  assert.deepEqual(ava?.runsOn, { provider: 'chatgpt', model: DEFAULT_CHATGPT_MODEL });
 });
 
 test('a chatgpt run refuses any base URL: the sign-in goes only to OpenAI', async () => {
