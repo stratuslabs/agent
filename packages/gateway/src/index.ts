@@ -770,9 +770,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
    * broken untrusted file is never the reason nothing dispatches. One the
    * daemon was running on is an operator mid-edit, though: that throws the
    * ConfigFileError the last-known-good paths handle, so neither the
-   * runtime nor the default agent moves to another file's settings. Both
-   * resolve from the snapshot this returns rather than discovering again,
-   * which a save landing in between could send to a different file.
+   * runtime nor the default agent moves to another file's settings. Each
+   * caller resolves from the snapshot this returns rather than discovering
+   * again, which a save landing in between could send to a different file.
    */
   const dispatchConfigSnapshot = async (): Promise<{
     snapshot: NonNullable<RuntimeSelection['presetConfig']>;
