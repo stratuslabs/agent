@@ -216,7 +216,10 @@ export const createTurnDispatch = ({
     // The fallback counts: a turn can switch to it mid-run. Once a session
     // has switched for good, the primary is never called again, and only
     // the fallback counts.
-    const hostedLoop = input.idempotencyKey !== undefined && reachesHarness(config, switchedToFallback);
+    // A front turn can reach the agent's own runtime too, for a call the
+    // front model fails, so a harness there counts.
+    const hostedLoop = input.idempotencyKey !== undefined
+      && (reachesHarness(config, switchedToFallback) || (front !== undefined && reachesHarness(main, watched.switchedToFallback)));
 
     return settleLeftForNextStart(input, onTurnRuntime(input.sessionId, { source, config }, () => withWatchdog(input.sessionId, source.definition.id, input.signal, effectiveStreams, fallbackStreams, async (signal) => {
       // The preflight above (agent refresh, config resolution, session

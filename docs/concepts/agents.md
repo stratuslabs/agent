@@ -353,7 +353,9 @@ front:
   `agent.cancelTask` (and `agent.messageTask`, once it ships), plus a quick
   set: `memory.recall`, `memory.remember`, `message.read`, `message.send`,
   `fs.read`, `fs.list` and `fs.search`. `front.tools` replaces the quick set.
-  Neither ever grants a tool the soul's own `tools:` does not, and with no
+  Nothing else, not even the `credential.request` every other turn holds (a
+  task asks for a key instead). Neither list ever grants a tool the soul's
+  own `tools:` does not, and with no
   `tools:` the front gets only the safe ones of its set, as any turn would.
   `skill.read` follows `skills:` as it does on every turn. No writes, shell or
   web by default: add one to `front.tools` and the front waits on it.
