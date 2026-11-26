@@ -12,13 +12,14 @@ import {
   parseCommand,
   readServiceCommand,
   readServiceStatus,
-  runCli,
+  runCli as runCliHere,
   serviceUnitPath,
   startService,
   type CliEnvironment,
   type ServiceRunner,
 } from '../src/index.ts';
 import { defaultUpdateContinuation } from '../src/commands/update.ts';
+import { defaultInstalledVersionReader } from '../src/npm.ts';
 import { stableNodePath } from '../src/service.ts';
 import {
   AGENTS_FOLDER_RECORD,
@@ -34,6 +35,20 @@ import {
 } from '@stratusagent/state';
 
 const freshHome = () => mkdtemp(path.join(os.tmpdir(), 'stratus-update-'));
+
+/**
+ * `runCli`, on a machine with no web dashboard unless a test's own reader
+ * says otherwise. This checkout links a stand-in for
+ * `@stratusagent/dashboard` at its root, so `stratus dashboard` has a page to
+ * serve; read as installed, every update here would sweep it against npm.
+ */
+const runCli: typeof runCliHere = (options) => runCliHere({
+  ...options,
+  env: {
+    installedVersionReader: async (specifier) => (specifier === '@stratusagent/dashboard' ? undefined : defaultInstalledVersionReader(specifier)),
+    ...options.env,
+  },
+});
 
 const createStreams = () => {
   let stdout = '';
@@ -1762,6 +1777,73 @@ test('memory-sqlite releases from the plugins repository now, so update moves a 
   assert.doesNotMatch(streams.output.stdout, /alongside the CLI/);
 });
 
+/** A release with no plugin manifest, as the dashboard's are. */
+const pageRelease = (version: string) => ({ status: 'published' as const, version });
+
+test('the dashboard releases from the plugins repository now, so update moves a 0.14.x install to its own release though no config names it', async () => {
+  // Up to 0.14.x it shipped from this repository at the CLI's version, as a
+  // companion. It is not a plugin, so no `plugins` block names it and its
+  // releases carry no plugin manifest: held to the CLI's version it would
+  // ask npm for a release that no longer exists, and swept only from the
+  // config it would never move again.
+  const home = await freshHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runStateMigrations(env, { exclusive: true });
+  const asked: string[] = [];
+  const streams = createStreams();
+  const code = await runCli({
+    argv: ['update', '--check'],
+    streams: streams.streams,
+    env: {
+      ...env,
+      serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
+      packageVersionFetcher: async () => CLI_VERSION,
+      installedVersionReader: async (specifier) => (specifier === '@stratusagent/dashboard' ? '0.14.23' : undefined),
+      pluginReleaseReader: async (name) => {
+        asked.push(name);
+        return name === '@stratusagent/dashboard' ? pageRelease('0.15.0') : { status: 'unknown' };
+      },
+    },
+  });
+  assert.equal(code, 1, streams.output.stdout);
+  assert.deepEqual(asked, ['@stratusagent/dashboard']);
+  assert.match(streams.output.stdout, /@stratusagent\/dashboard 0\.14\.23 → 0\.15\.0/);
+  assert.doesNotMatch(streams.output.stdout, /alongside the CLI/);
+  assert.doesNotMatch(streams.output.stdout, /held/);
+});
+
+test('update leaves the dashboard alone when it is not installed, and when it is current', async () => {
+  const home = await freshHome();
+  const env = { homeDir: home, cwd: home, processEnv: {} };
+  await runStateMigrations(env, { exclusive: true });
+  const check = async (installed: string | undefined) => {
+    const asked: string[] = [];
+    const streams = createStreams();
+    const code = await runCli({
+      argv: ['update', '--check'],
+      streams: streams.streams,
+      env: {
+        ...env,
+        serviceRunner: runningServiceRunner, serviceSleep: noServiceWait,
+        packageVersionFetcher: async () => CLI_VERSION,
+        installedVersionReader: async (specifier) => (specifier === '@stratusagent/dashboard' ? installed : undefined),
+        pluginReleaseReader: async (name) => {
+          asked.push(name);
+          return pageRelease('0.15.0');
+        },
+      },
+    });
+    return { code, asked, stdout: streams.output.stdout };
+  };
+  const absent = await check(undefined);
+  assert.equal(absent.code, 0, absent.stdout);
+  assert.deepEqual(absent.asked, [], 'nothing installed, nothing to ask npm about');
+  const current = await check('0.15.0');
+  assert.equal(current.code, 0, current.stdout);
+  assert.doesNotMatch(current.stdout, /@stratusagent\/dashboard/);
+  assert.match(current.stdout, /Nothing to do/);
+});
+
 test('update installs each plugin that lags, pinned to the checked release, while the daemon is stopped', async () => {
   const home = await freshHome();
   const events: string[] = [];
@@ -1790,8 +1872,9 @@ test('update installs each plugin that lags, pinned to the checked release, whil
       servicePlatform: 'linux',
       serviceRunner: runner, serviceSleep: noServiceWait,
       packageVersionFetcher: async () => CLI_VERSION,
-      installedVersionReader: async (specifier) => ({ '@stratusagent/plugin-spawn': '0.1.0', '@stratusagent/plugin-peer': '0.1.0' } as Record<string, string>)[specifier],
-      pluginReleaseReader: async () => releaseOf('0.2.0'),
+      installedVersionReader: async (specifier) => ({ '@stratusagent/plugin-spawn': '0.1.0', '@stratusagent/plugin-peer': '0.1.0', '@stratusagent/dashboard': '0.14.23' } as Record<string, string>)[specifier],
+      // The dashboard is not configured and not a plugin; it is swept all the same.
+      pluginReleaseReader: async (name) => (name === '@stratusagent/dashboard' ? pageRelease('0.15.0') : releaseOf('0.2.0')),
       packageInstaller: async (packages) => {
         events.push(`install ${packages.join(' ')}`);
         // One plugin's broken release must not hold back the others.
@@ -1803,7 +1886,7 @@ test('update installs each plugin that lags, pinned to the checked release, whil
   });
   assert.equal(code, 1, 'a plugin left behind is a failed update');
   const installs = events.filter((event) => event.startsWith('install'));
-  assert.deepEqual(installs.sort(), ['install @stratusagent/plugin-peer@0.2.0', 'install @stratusagent/plugin-spawn@0.2.0']);
+  assert.deepEqual(installs.sort(), ['install @stratusagent/dashboard@0.15.0', 'install @stratusagent/plugin-peer@0.2.0', 'install @stratusagent/plugin-spawn@0.2.0']);
   const stop = events.indexOf('stop');
   const start = events.indexOf('start', stop);
   assert.ok(stop >= 0 && start > stop, events.join(', '));

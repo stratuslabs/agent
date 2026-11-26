@@ -35,8 +35,8 @@ stratus dashboard
 
 The dashboard is two optional packages, `@stratusagent/control-api` and
 `@stratusagent/dashboard`. When they are missing, the command says so and
-offers to install them (at the CLI's own version) before it starts
-anything; without a terminal to ask at, it prints the `npm install -g`
+offers to install them (the control API at the CLI's own version, the
+dashboard at its latest release) before it starts anything; without a terminal to ask at, it prints the `npm install -g`
 command instead. If an always-on daemon was already running, restart it
 after the install so it loads the control API.
 

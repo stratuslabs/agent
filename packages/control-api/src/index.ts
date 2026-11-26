@@ -56,12 +56,16 @@ export const DEFAULT_CONTROL_API_HOST = '127.0.0.1';
  * The UI is a separate optional package because the two other consumers of
  * this API — the macOS app and a headless VM deployment — want the API and
  * not a web page. This package therefore serves `/api/v1` and nothing else
- * on its own; assets are something handed to it.
+ * on its own; assets are something handed to it. The package releases from
+ * `stratuslabs/plugins` on its own versions, so this repository holds no
+ * copy of it: `createDashboardAssets()` returning this is the contract.
  */
 export interface DashboardAssets {
   /** Serve this path, or report that there is no asset for it. */
   serve(pathname: string, response: ServerResponse): Promise<boolean>;
 }
+
+const DASHBOARD_PACKAGE = '@stratusagent/dashboard';
 
 /**
  * Load the optional dashboard package, or undefined when it is absent.
@@ -74,12 +78,17 @@ export interface DashboardAssets {
  */
 const loadDashboardAssets = async (): Promise<DashboardAssets | undefined> => {
   try {
-    import.meta.resolve('@stratusagent/dashboard');
+    import.meta.resolve(DASHBOARD_PACKAGE);
   } catch {
     return undefined;
   }
-  const { createDashboardAssets } = await import('@stratusagent/dashboard');
-  return createDashboardAssets();
+  // Through a variable: nothing here depends on the package, so there are
+  // no types to check the import against, and its shape is checked instead.
+  const loaded = await import(DASHBOARD_PACKAGE) as { createDashboardAssets?: unknown };
+  if (typeof loaded.createDashboardAssets !== 'function') {
+    throw new Error(`${DASHBOARD_PACKAGE} is installed but exports no createDashboardAssets(); reinstall it with \`npm install -g ${DASHBOARD_PACKAGE}@latest\`.`);
+  }
+  return (loaded.createDashboardAssets as () => DashboardAssets)();
 };
 
 export interface ControlApiOptions {

@@ -31,7 +31,6 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@stratusagent/dashboard": "workspace:*",
     "@types/node": "^24.6.0",
     "@types/ws": "^8.5.13",
     "typescript": "^5.9.3"
@@ -54,7 +53,7 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@stratusagent/dashboard": "workspace:*"
+    "@stratusagent/dashboard": "*"
   },
   "peerDependenciesMeta": {
     "@stratusagent/dashboard": {

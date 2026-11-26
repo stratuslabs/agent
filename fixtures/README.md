@@ -12,6 +12,7 @@ by an object literal.
 | `stratus-plugin-fixture-provider` | a **provider** registered through `context.providers`, selectable with `provider: fixture` |
 | `stratus-plugin-fixture-channel` | a **channel** registered through `context.channels`, carrying the agents with secrets under `channels.fixture.<agentId>` |
 | `stratus-plugin-fixture-memory` | a **memory store** registered through `context.memory`, selectable with `memoryStore: fixture` |
+| `stratus-dashboard-fixture` | not a plugin: the **web dashboard** the control API loads by name when it is installed, linked from the root as `@stratusagent/dashboard`. The real one releases from `stratuslabs/plugins` |
 | `stratus-plugin-fixture-executor` | an **executor** registered through `context.executors`, selectable with `executor: fixture`; with `disposeMarker: <path>` in its config it writes that file on dispose, so a test can prove a host released it |
 
 One package per kind rather than one package registering all four, so each
@@ -21,8 +22,12 @@ that ships, and linked from the **root** `package.json` — a published
 package listing a private `workspace:*` devDependency would leave a version
 nobody can resolve in its published metadata.
 
-Two root links are aliases rather than packages: `stratus-plugin-aliased`
-(of `stratus-plugin-fixture`), for a config key that differs from its
-manifest's `packageName`, and `stratus-plugin-fixture-channel-twin` (of
-`stratus-plugin-fixture-channel`), for two enabled plugins contributing the
-same channel kind.
+Three root links are aliases rather than packages: `@stratusagent/dashboard`
+(of `stratus-dashboard-fixture`), because the control API resolves that name
+and the package it names no longer lives here (the CLI and the control API
+declare it as an optional peer, and pnpm installs a package's own peers, so
+`pnpm-workspace.yaml` overrides the name to this fixture for them too);
+`stratus-plugin-aliased` (of `stratus-plugin-fixture`), for a config key that
+differs from its manifest's `packageName`; and
+`stratus-plugin-fixture-channel-twin` (of `stratus-plugin-fixture-channel`),
+for two enabled plugins contributing the same channel kind.

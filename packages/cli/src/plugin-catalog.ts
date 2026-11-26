@@ -25,7 +25,7 @@ export const FIRST_PARTY_CAPABILITY_PACKAGES = [
 /**
  * The optional first-party packages a machine installs alongside the CLI:
  * the ones that are not plugins and so appear in no `plugins` block —
- * the Slack channel, the control API, the dashboard it serves.
+ * the Slack channel and the control API.
  *
  * Named here with the capability packages because `stratus update` needs
  * one answer to "what else of ours is on this machine". They ship from
@@ -36,12 +36,25 @@ export const FIRST_PARTY_CAPABILITY_PACKAGES = [
 export const FIRST_PARTY_COMPANION_PACKAGES = [
   '@stratusagent/channel-slack',
   '@stratusagent/control-api',
-  '@stratusagent/dashboard',
   // The providers, which the CLI no longer carries: setup installs the one
   // chosen, and update keeps whichever this machine has level.
   '@stratusagent/provider-anthropic',
   '@stratusagent/provider-claude-code',
   '@stratusagent/provider-codex',
+];
+
+/**
+ * The first-party packages that are not plugins and release on their own,
+ * from `stratuslabs/plugins`: the web dashboard the control API serves.
+ *
+ * No `plugins` block names them and their releases carry no plugin
+ * manifest, so `stratus update` sweeps them by being installed rather than
+ * configured, and moves them to their latest release rather than the CLI's
+ * version. The dashboard shipped from this repository as a companion up to
+ * 0.14.x, which is why it must not be on that list as well.
+ */
+export const FIRST_PARTY_SEPARATE_PACKAGES = [
+  '@stratusagent/dashboard',
 ];
 
 /**

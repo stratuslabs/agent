@@ -42,7 +42,6 @@
   "devDependencies": {
     "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/control-api": "workspace:*",
-    "@stratusagent/dashboard": "workspace:*",
     "@stratusagent/plugin-mcp": "workspace:*",
     "@stratusagent/provider-anthropic": "workspace:*",
     "@stratusagent/provider-chatgpt": "workspace:*",
@@ -75,7 +74,7 @@
   "peerDependencies": {
     "@stratusagent/channel-slack": "workspace:*",
     "@stratusagent/control-api": "workspace:*",
-    "@stratusagent/dashboard": "workspace:*"
+    "@stratusagent/dashboard": "*"
   },
   "peerDependenciesMeta": {
     "@stratusagent/channel-slack": {

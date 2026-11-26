@@ -157,7 +157,7 @@ hand and by review:
   shared, not by line count.** `state` grew `memory.ts` and `gateway`
   grew `schedules.ts` that way; a large `index.ts` that is one coherent
   surface stays one file.
-- **`core`, `egress`, and `dashboard` carry no dependencies on
+- **`core` and `egress` carry no dependencies on
   purpose.** Keep them that way — a dependency added to `core` lands in
   every install of everything.
 - The moment a private rule gets a second consumer, move it to the

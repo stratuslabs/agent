@@ -21,6 +21,7 @@
     "url": "git+https://github.com/stratuslabs/agent.git"
   },
   "devDependencies": {
+    "@stratusagent/dashboard": "workspace:stratus-dashboard-fixture@*",
     "stratus-plugin-aliased": "workspace:stratus-plugin-fixture@*",
     "stratus-plugin-fixture": "workspace:*",
     "stratus-plugin-fixture-channel": "workspace:*",

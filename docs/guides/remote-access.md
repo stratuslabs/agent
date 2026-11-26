@@ -12,6 +12,10 @@ npm install -g @stratusagent/control-api @stratusagent/dashboard
 `stratus dashboard` offers that install itself when either is missing.
 Install `@stratusagent/control-api` alone for a headless machine; add
 `@stratusagent/dashboard` and the API serves the web UI at `/` as well.
+The control API ships with the CLI, at its version. The dashboard releases
+from [`stratuslabs/plugins`](https://github.com/stratuslabs/plugins/tree/main/dashboard)
+on versions of its own, so `stratus dashboard` installs its latest release
+and `stratus update` keeps it current (see [Updating](updating.md)).
 Against a daemon already running the API without the web UI,
 `stratus dashboard` offers `@stratusagent/dashboard` and then asks you to
 `stratus restart` the daemon so it loads it.
