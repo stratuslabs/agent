@@ -384,9 +384,11 @@ a task's worker included, can't start a task. Tasks are on unless
   another conversation with the same agent gets an error. A task that has
   ended, or that a stop was asked for, takes nothing and says so. A
   follow-up the task ended before reading is listed in its outcome notice.
-  Follow-ups wait in memory, so a restart loses them along with the task.
-  The tool is `safe`, and is asked about first once the conversation has
-  read outside content, like `agent.delegate`.
+  A task on Codex doesn't take messages mid-task yet, so every follow-up
+  sent to one is listed there. Follow-ups wait in memory, so a restart
+  loses them along with the task. The tool is `safe`, and is asked about
+  first once the conversation has read outside content, like
+  `agent.delegate`.
 - **Seeing them.** An agent lists its own with `agent.tasks`.
   `stratus tasks` lists the running daemon's tasks: every
   one running or whose outcome isn't in its conversation yet, newest

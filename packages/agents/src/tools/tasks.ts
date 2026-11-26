@@ -248,7 +248,8 @@ export const createTaskTools = (host: TaskToolsHost, { now = Date.now }: { now?:
             delivered: 'at_next_step',
             note: answer.already === true
               ? 'This follow-up was already passed on, so it was not sent again.'
-              : 'Passed on. The task reads it at its next step. If it ends first, its result lists it as unread.',
+              : 'Passed on. The task reads it at its next step. If it ends before reading it, which a task on a provider '
+                + 'that can\'t take messages mid-task always does, its result lists it as unread.',
           };
       }
     },
