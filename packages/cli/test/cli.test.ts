@@ -527,6 +527,26 @@ test('runCli agents on a fresh machine says there are none yet, and how to make 
   assert.match(output.stdout, /No agents yet\. Create your first with stratus setup, or stratus agent new\./);
 });
 
+test('runCli agents points at stratus run only when a default exists', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));
+  // Agents on disk, none the default: `stratus run` would refuse, so the
+  // footer must not suggest it.
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'blair.md'), '---\nname: Blair\nid: blair\n---\n\nYou help.\n');
+  const none = createStreams();
+  assert.equal(await runCli({ argv: ['agents'], streams: none.streams, env: { cwd, homeDir: home, processEnv: {} } }), 0);
+  assert.doesNotMatch(none.output.stdout, /Talk to the default/);
+  assert.match(none.output.stdout, /No default agent is set\. Talk to one with stratus run --soul <file>, or pick a default with `stratus setup` → Agent\./);
+
+  // With a default, the footer names it.
+  await addDefaultAgent(home);
+  const withDefault = createStreams();
+  assert.equal(await runCli({ argv: ['agents'], streams: withDefault.streams, env: { cwd, homeDir: home, processEnv: {} } }), 0);
+  assert.match(withDefault.output.stdout, /Talk to the default with stratus run, or to anyone with stratus run --soul <file>\./);
+  assert.doesNotMatch(withDefault.output.stdout, /No default agent is set/);
+});
+
 test('runCli agent new generates a full identity with name and avatar theme', async () => {
   const named = createStreams();
   const namedExit = await runCli({

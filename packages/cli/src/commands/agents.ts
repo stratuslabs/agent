@@ -102,8 +102,12 @@ export const runAgents = async (
     }
   }
   writeLine(streams.stdout);
+  // `stratus run` with no --soul refuses when no agent is the default, so
+  // only point at it when one is.
   writeLine(streams.stdout, listings.length === 0
     ? 'No agents yet. Create your first with stratus setup, or stratus agent new.'
-    : 'Talk to the default with stratus run, or to anyone with stratus run --soul <file>.');
+    : listings.some((agent) => agent.default)
+      ? 'Talk to the default with stratus run, or to anyone with stratus run --soul <file>.'
+      : 'No default agent is set. Talk to one with stratus run --soul <file>, or pick a default with `stratus setup` → Agent.');
   return 0;
 };
