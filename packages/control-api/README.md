@@ -149,7 +149,7 @@ log, and an address bar is one that gets noticed when it changes.
 | POST | `/sessions/:id/stop` | Stop the turn running on a session, the way "stop" does in Slack: every turn running there is aborted and fails with a reason naming who stopped it (`Stopped from the dashboard.` for a browser session, `Stopped through the control API.` for a bearer token), its session saved, and the background tasks the conversation started are stopped too → `200 { sessionId, stopped, tasks, reason }`: the counts of turns and tasks now stopping, and the reason the stopped turns fail with, which their `session.failed` carries. A message sent through this API that is still queued or not yet started is stopped too, so it never runs; one another caller queued (a Slack thread) is left to that caller. Nothing running or waiting answers `stopped: 0`, not an error. `404 session_not_found` for an unknown id |
 | POST | `/sessions/:id/rollover` | Start the conversation over under the same id: the transcript so far is saved as a new session (`<id>:rolledover:<time>-<suffix>`) and the live row is emptied, keeping only the routing metadata a channel needs → `200 { sessionId, archivedAs }`. The remedy for a session from before trust labels existed, which reads `unknown` for as long as it lasts. `409 session_busy` while a turn is running or parked, `409 session_archived` for an archive, `404` for an unknown id |
 | GET | `/approvals` | Calls parked on a human right now. A background task's call carries `taskId` |
-| POST | `/approvals` | Resolve one: `{ requestId, answer, actor? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
+| POST | `/approvals` | Resolve one: `{ requestId, answer, actor?, shownInFull? }`, where `answer` is `once`, `always`, or `deny` — see [below](#always-means-one-thing-and-the-request-says-which) |
 | GET | `/schedules` | Every schedule the fleet has set — cadence, prompt, pre-authorized destination, next firing, last firing. An event trigger has no next firing and carries `event` (`source`, `filter`, and `quietHours` / `maxPerHour` when set); its last firing is when its newest batch went out. The audit list: each row with a destination is a standing permission to speak |
 | DELETE | `/schedules/:id` | Cancel a schedule. Also revokes the destination grant riding on the row — a still-running firing's next send is gated normally. 404 when no such schedule exists |
 | GET | `/tasks` | Background tasks (`tasks` in the config): every one running or whose outcome isn't in its conversation yet, newest first, then the 20 most recently finished. Each carries `id`, `agentId` (who started it), `workerAgentId`, `originSessionId`, `workerSessionId`, `status` (`running`, `waiting_approval`, `completed`, `failed`, `cancelled`, `interrupted`, read live from the worker session), `delivery` (`pending`, `delivered`, `dropped`), `stoppedBy` once someone asked for a stop, `steps`, `createdAt`, `updatedAt`, `endedAt`. Never a prompt or a result. `?agent=<id>` for the tasks one agent started. Listed whether or not tasks are on |
@@ -481,6 +481,15 @@ actor bare, so a request cannot spell a Slack approver's id and read as that
 approver's decision. A request that has already been decided, has expired,
 or whose turn was cancelled answers `409 approval_not_pending` rather than
 silently doing nothing twice.
+
+`shownInFull: true` is the client's word that it showed the person the call's
+whole input, nothing cut or left out (the dashboard sends it for every card
+but a shell call's, which shows only the command). Only then is the yes
+recorded as that person's for the call, which is what lets a schedule set
+after the conversation read outside content have its prompt reviewed as their
+request. Leave it off when your client truncates or hides any argument; the
+call still runs on `once` or `always`. Anything but a boolean is
+`400 invalid_body`.
 
 `once` and `deny` mean what they say, for this call. **`always` is a grant to
 the agent, and it lasts until an operator revokes it** — for every tool but

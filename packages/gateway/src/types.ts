@@ -417,6 +417,11 @@ export interface ResolveApprovalInput {
    */
   actor?: string;
   /**
+   * True only when the person was shown the call's whole input, so the
+   * policy may name them as the one who said yes (`ApprovalOutcome.shownInFull`).
+   */
+  shownInFull?: boolean;
+  /**
    * Why, when it was not a person. A channel that cannot deliver a request
    * — nobody configured to ask, nowhere to ask — still has to settle it,
    * and recording that as `decided` would file a denial nobody made

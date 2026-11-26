@@ -460,7 +460,7 @@ export const createInteractions = ({
     // The retraction rides on tool.approval-resolved, which the gateway
     // emits from resolveApproval — so a decision and the message showing it
     // cannot disagree, and the timeout path retracts through the same code.
-    if (!gateway.resolveApproval({ requestId, answer, actor: clicker })) {
+    if (!gateway.resolveApproval({ requestId, answer, actor: clicker, ...(post.shownInFull ? { shownInFull: true } : {}) })) {
       await tellClicker(connection, args, 'That approval request is no longer pending.');
     }
   };

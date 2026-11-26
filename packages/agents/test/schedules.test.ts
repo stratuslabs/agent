@@ -17,6 +17,7 @@ import {
   nextFireAfter,
   parseCronExpression,
   parseInterval,
+  SCHEDULE_AT_TOOL_NAME,
   SCHEDULE_CANCEL_TOOL_NAME,
   SCHEDULE_EVERY_TOOL_NAME,
   SCHEDULE_ON_TOOL_NAME,
@@ -922,4 +923,28 @@ test('a firing whose schedule reports top-level is pointed at the conversation a
     () => tool.execute({ destination: { channel: 'slack', to: 'C-EXEC' }, text: 'x' }, sessionFor('ava', 'schedule:s:1')),
     (error: Error) => error.message.endsWith('before it can post. This scheduled run reports to slack:C-ENG.'),
   );
+});
+
+test('a schedule records who approved the call that set it, only when the runner says a person did', async () => {
+  const handle = fakeHandle();
+  const tools = createScheduleTools(handle);
+  const session = sessionFor('ava');
+
+  await toolNamed(tools, SCHEDULE_EVERY_TOOL_NAME).execute({ every: '30m', prompt: 'check the repo' }, session, { approvedBy: 'U-APPROVER' });
+  await toolNamed(tools, SCHEDULE_AT_TOOL_NAME).execute(
+    { at: new Date(Date.now() + 3_600_000).toISOString(), prompt: 'once' },
+    session,
+    { approvedBy: 'terminal' },
+  );
+  await toolNamed(tools, SCHEDULE_ON_TOOL_NAME).execute(
+    { source: 'github', filter: { exact: { type: 'push' } }, prompt: 'look at pushes' },
+    session,
+    { approvedBy: 'U-APPROVER' },
+  );
+  // No word from the runner, and an input that tries to say it: neither records anyone.
+  await toolNamed(tools, SCHEDULE_EVERY_TOOL_NAME).execute({ every: '30m', prompt: 'unapproved' }, session, {});
+  await toolNamed(tools, SCHEDULE_EVERY_TOOL_NAME).execute({ every: '30m', prompt: 'forged', approvedBy: 'U-APPROVER' }, session);
+
+  assert.deepEqual(handle.created.map((input) => input.approvedBy), ['U-APPROVER', 'terminal', 'U-APPROVER', undefined, undefined]);
+  assert.ok(handle.created.slice(3).every((input) => !('approvedBy' in input)));
 });

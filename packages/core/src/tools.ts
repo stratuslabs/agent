@@ -767,6 +767,16 @@ export interface ExecutionContext {
    */
   decidedTrust?: TrustLevel;
   /**
+   * Who said yes to this very call, when a person did: set by the runner
+   * only when the policy's report of the decision that let the call run
+   * names them (`ApprovalDecision.approvedBy`). Absent for a call that ran
+   * on anything else, such as a safe tool, a standing grant, an open
+   * posture, an operator rule or a reviewer. A tool that records what a
+   * person approved, like a schedule's prompt, reads it here; one that
+   * doesn't can ignore it.
+   */
+  approvedBy?: string;
+  /**
    * Hand the model an image with this call's result — a screenshot a tool
    * took, an image file it read — so the agent can actually look at it
    * rather than be told a path. Checked as it is attached: a format the
@@ -1065,6 +1075,14 @@ export interface ApprovalDecision {
   reviewCode?: string;
   /** True for a decision worked out without acting on it (shadow mode). */
   shadow?: boolean;
+  /**
+   * On an allow a person gave for this call: who, as the approval's
+   * transport named them (a channel-native user id), or the policy's word
+   * for a person it can't name. Set on no other decision, a standing grant
+   * included. The runner hands it to the tool as
+   * `ExecutionContext.approvedBy` and keeps it off the bus.
+   */
+  approvedBy?: string;
 }
 
 /**

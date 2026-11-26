@@ -150,8 +150,15 @@ control API's event stream carries only its `session.usage`. It sees:
 - **the request**: only what the people the agent serves wrote in this
   conversation (newest last, up to 4 KB), or a schedule's or trigger's own
   prompt (never the event text a trigger delivers, and nothing at all when
-  the schedule was set by a conversation that had read outside content), or
-  a delegating agent's instruction, marked as such;
+  the schedule was set by a conversation that had read outside content,
+  unless a person approved that exact `schedule.every`, `schedule.at` or
+  `schedule.on` call when it was set on a prompt that showed the whole call
+  (a Slack prompt that cut long arguments, or a terminal prompt that capped
+  them, doesn't count); a standing
+  grant, the open posture or shadow running it without asking, a rule or
+  the reviewer allowing it doesn't count, and neither does a schedule set
+  before this was recorded), or a delegating agent's instruction, marked as
+  such;
 - **the proposed call**: tool, risk, the first line of the tool's
   description (never for an `mcp.*` tool, whose description its server
   wrote) and input, marked as data the agent composed. A call over 8 KB

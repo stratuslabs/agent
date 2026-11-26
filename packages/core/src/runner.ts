@@ -2624,11 +2624,14 @@ export class AgentRunner {
     /** The policy's reason for its last "no", when it gave one. */
     let refusal: string | undefined;
     let decidedTrust: TrustLevel = sessionTrustOf(session);
+    /** Who said yes to this call, when the decision that lets it run was a person's. */
+    let approvedBy: string | undefined;
     let movedTwice = false;
     try {
       await lowerBeforeCall();
       const decide = async (): Promise<boolean> => {
         decidedTrust = sessionTrustOf(session);
+        approvedBy = undefined;
         // Reports made while the policy decides wait for its answer, so a
         // surface reads the decision before the call it is about; one made
         // after (worked out off the call path) goes out when it is made.
@@ -2640,6 +2643,15 @@ export class AgentRunner {
             void this.bus.emit(event);
           } else {
             reported.push(event);
+            // The last report made before the answer is the decision. A
+            // shadow one is worked out beside it and decides nothing.
+            if (decision.shadow !== true) {
+              approvedBy = decision.allowed === true
+                && typeof decision.approvedBy === 'string'
+                && decision.approvedBy.trim().length > 0
+                ? decision.approvedBy
+                : undefined;
+            }
           }
         };
         let answer: boolean | ApprovalRefusal;
@@ -2665,6 +2677,9 @@ export class AgentRunner {
         // truthy answer as a yes, as a plain-JavaScript policy once could,
         // would run the very call it refused.
         refusal = answer === true ? undefined : refusalReasonOf(answer);
+        if (answer !== true) {
+          approvedBy = undefined;
+        }
         return answer === true;
       };
       approved = await decide();
@@ -2761,6 +2776,7 @@ export class AgentRunner {
     const executed = await untilStoppedFor(this.executor.execute(call, tool, session, {
       ...(signal ? { signal } : {}),
       decidedTrust,
+      ...(approvedBy !== undefined ? { approvedBy } : {}),
       attachImage: collector.attach,
     }), call, signal);
     // Only a call that succeeded shows what it attached: a failure's error

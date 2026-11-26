@@ -2871,6 +2871,21 @@ test('an approval decided through the API is recorded as the API, never as a cha
     const unlabelled = park('sess-plain');
     await decide('sess-plain', { answer: 'deny' });
     assert.deepEqual(await settles(unlabelled, 'the unlabelled call'), { answer: 'deny', actor: 'api' });
+
+    // A client that showed the whole call says so; only a boolean is taken.
+    const whole = park('sess-whole');
+    await decide('sess-whole', { answer: 'once', shownInFull: true });
+    assert.deepEqual(await settles(whole, 'the call shown in full'), { answer: 'once', actor: 'api', shownInFull: true });
+    const notBoolean = park('sess-not-boolean');
+    const listed = await json<{ approvals: Array<{ requestId: string; sessionId: string }> }>(await harness.call('/api/v1/approvals'));
+    const refused = await harness.call('/api/v1/approvals', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ requestId: listed.approvals.find((entry) => entry.sessionId === 'sess-not-boolean')?.requestId, answer: 'once', shownInFull: 'yes' }),
+    });
+    assert.equal(refused.status, 400);
+    await decide('sess-not-boolean', { answer: 'deny' });
+    await settles(notBoolean, 'the call refused a bad body');
   } finally {
     await harness.stop();
   }

@@ -2764,6 +2764,25 @@ test('a parked call is announced, and the answer resumes it', async () => {
   await gateway.stop();
 });
 
+test('the answer says the whole call was shown only when the channel said so', async () => {
+  const { gateway, transport } = await brokerHarness();
+  const answerWith = async (input: { shownInFull?: boolean; reason?: 'undeliverable' }): Promise<unknown> => {
+    const requested = nextEvent(gateway.bus, 'tool.approval-requested');
+    const answer = transport.request(parkedCall('sess-shown'));
+    const request = await settles(requested, 'the approval request');
+    assert.equal(gateway.resolveApproval({ requestId: request.requestId, answer: 'once', actor: 'U9', ...input }), true);
+    return settles(answer, 'the parked call');
+  };
+
+  assert.deepEqual(await answerWith({ shownInFull: true }), { answer: 'once', actor: 'U9', shownInFull: true });
+  assert.deepEqual(await answerWith({ shownInFull: false }), { answer: 'once', actor: 'U9' });
+  assert.deepEqual(await answerWith({}), { answer: 'once', actor: 'U9' });
+  // Nobody was shown anything when the channel couldn't deliver the request.
+  assert.equal(Object.hasOwn(await answerWith({ shownInFull: true, reason: 'undeliverable' }) as object, 'shownInFull'), false);
+
+  await gateway.stop();
+});
+
 test('a request nobody answers expires into a denial', async () => {
   // 1ms, and the assertion gates on the settled request rather than a
   // sleep: the point is that the timeout path denies and says so, not how
