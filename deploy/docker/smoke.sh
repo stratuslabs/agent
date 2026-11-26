@@ -98,6 +98,13 @@ echo "--- promote"
 call POST /promote | grep -q '"held":false' || fail "promote did not release the hold"
 call GET /health | grep -q '"held":false' || fail "health still reports held after promote"
 
+echo "--- the dashboard is in the image"
+# The root filesystem is read-only in the documented deployment, so a
+# dashboard missing from the image cannot be installed later: the API
+# would answer every page request with no_dashboard.
+page=$(curl -fsS --max-time 30 -H "authorization: Bearer ${TOKEN}" "${API%/api/v1}/") || fail "the dashboard page did not load"
+printf '%s' "$page" | grep -qi '<title>' || fail "the dashboard page has no title"
+
 echo "--- pause, restart, still paused"
 call PUT /intake '{"paused":true,"message":"Smoke test pause."}' | grep -q '"paused":true' || fail "pause was refused"
 docker restart "$NAME" >/dev/null
