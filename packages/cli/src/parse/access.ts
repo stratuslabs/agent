@@ -98,7 +98,8 @@ export const parseCredentialCommand = (command: 'credentials' | 'credential', re
     if (token === '--help' || token === '-h') {
       return { command: 'help' };
     }
-    if (token === '--agent') {
+    // The list shows every agent's names, so --agent would filter nothing.
+    if (token === '--agent' && subcommand !== 'list') {
       agentId = readOptionValue(credentialRest, index, '--agent');
       index += 1;
       continue;

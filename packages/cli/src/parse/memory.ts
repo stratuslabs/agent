@@ -90,7 +90,10 @@ export const parseMemoryCommand = (rest: string[]): ParsedMemoryCommand | Parsed
     if (token === '--help' || token === '-h') {
       return { command: 'help' };
     }
-    if (token === '--trust') {
+    // Only list filters by a label and only reassert records one.
+    // Anywhere else --trust would be ignored, which reads as a filter
+    // that worked.
+    if (token === '--trust' && (memoryAction === 'list' || memoryAction === 'reassert')) {
       const value = readOptionValue(memoryRest, index, '--trust');
       if (!isTrustLevel(value)) {
         throw new Error(`Unsupported trust level: ${value}. Use one of ${TRUST_LEVELS.join(', ')}.`);
@@ -99,7 +102,8 @@ export const parseMemoryCommand = (rest: string[]): ParsedMemoryCommand | Parsed
       index += 1;
       continue;
     }
-    if (token === '--format') {
+    // export always writes JSONL.
+    if (token === '--format' && memoryAction !== 'export') {
       const value = readOptionValue(memoryRest, index, '--format');
       if (value !== 'text' && value !== 'json') {
         throw new Error(`Unsupported format: ${value}`);
