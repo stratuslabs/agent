@@ -2768,6 +2768,7 @@ export class AgentRunner {
     const collector = createImageCollector();
     const executed = await untilStoppedFor(this.executor.execute(call, tool, session, {
       ...(signal ? { signal } : {}),
+      callId: call.id,
       decidedTrust,
       ...(approvedBy !== undefined ? { approvedBy } : {}),
       attachImage: collector.attach,

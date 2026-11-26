@@ -1,5 +1,6 @@
 import {
   carriesKey,
+  leastTrusted,
   PENDING_APPROVAL_METADATA_KEY,
   recordTurnFailure,
   RunAbortedError,
@@ -8,18 +9,31 @@ import {
   type EventBus,
   type ObserveInput,
   type Session,
+  type SteeredMessage,
   type TasksStop,
 } from '@stratusagent/core';
 import {
   type DelegateBackgroundStart,
   TASK_ID_METADATA_KEY,
+  type TaskMessageAnswer,
+  type TaskMessageInput,
   type TaskSummary,
   type TaskToolsHost,
 } from '@stratusagent/agents';
 
 import type { TaskApprovalWait } from './approvals.ts';
+import { MERGED_SEPARATOR } from './merge-batch.ts';
 import type { ShardedSessionStore } from './sessions.ts';
-import { createTaskSettler, deriveTaskOutcome, TASK_CUT_OFF_ERROR, taskEvent, taskSteps, taskStoppedError, type TaskNotice } from './task-settle.ts';
+import {
+  createTaskSettler,
+  deriveTaskOutcome,
+  TASK_CUT_OFF_ERROR,
+  taskEvent,
+  taskSteps,
+  taskStoppedError,
+  type TaskFollowUp,
+  type TaskNotice,
+} from './task-settle.ts';
 import { isOpenTaskStatus, newTaskId, SqliteTaskStore, taskPromptDigest, type TaskDelivery, type TaskRow, type TaskStatus } from './tasks.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
 
@@ -31,6 +45,12 @@ import type { DispatchInput, GatewayOptions } from './types.ts';
 // on unless `tasks.enabled` is false. The restart sweep runs either way:
 // rows a process left before tasks were turned off still get settled, and
 // their workers failed as cut off, never left running.
+//
+// Follow-ups (`agent.messageTask`) wait in memory, per task, until the
+// worker's turn takes them at its next tool step through the same steer
+// hook a person's follow-up uses. Any its turn ended without reading are
+// listed in the outcome notice. A restart loses them with the task, which
+// is never run again; the conversation still holds the calls that sent them.
 
 /** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` names it. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
@@ -92,6 +112,21 @@ export interface TaskCancelInput {
   agentId?: string;
 }
 
+/** What a follow-up says to the task, above the conversation's own words. */
+export const TASK_FOLLOW_UP_HEADER = 'A follow-up about this task, from the conversation that asked for it:';
+
+/**
+ * One task's follow-ups while its worker runs here: those its turn hasn't
+ * taken yet, and every key ever queued, so the same call is passed on once.
+ * `open` until the worker's turn ends; after that nothing is queued, and
+ * what was never taken goes into the outcome notice.
+ */
+interface FollowUps {
+  open: boolean;
+  queued: TaskFollowUp[];
+  keys: Set<string>;
+}
+
 /** What background tasks close over in `createGateway`. */
 export interface BackgroundTasksDeps {
   options: GatewayOptions;
@@ -100,8 +135,16 @@ export interface BackgroundTasksDeps {
   stateHome: string;
   store: ShardedSessionStore;
   bus: Pick<EventBus, 'emit'>;
-  /** `conversation` as in `TurnDispatch.dispatchInternal`: true only for a notice to a person's conversation. */
-  dispatchInternal: (input: DispatchInput, conversation?: boolean) => Promise<Session>;
+  /**
+   * `conversation` and `steer` as in `TurnDispatch.dispatchInternal`:
+   * `conversation` true only for a notice to a person's conversation,
+   * `steer` only for a worker's turn, which takes its follow-ups through it.
+   */
+  dispatchInternal: (
+    input: DispatchInput,
+    conversation?: boolean,
+    steer?: (turnSignal: AbortSignal) => Promise<SteeredMessage | undefined>,
+  ) => Promise<Session>;
   onSessionChain: <T>(sessionId: string, work: () => Promise<T>) => Promise<T>;
   /**
    * The same chain, for a worker's turn: work a shutdown's drain doesn't
@@ -206,6 +249,28 @@ export const createBackgroundTasks = ({
    * question makes the mark and the last answer clears it.
    */
   const approvalWaits = new Map<string, { out: number; marked: Promise<void> }>();
+  /** Each task started here: its follow-ups, from its start until it is settled. */
+  const followUps = new Map<string, FollowUps>();
+
+  /**
+   * A worker turn's steer hook: every follow-up queued for its task, as one
+   * steered message labeled with the least trusted sender's label. No
+   * dispatch keys go with it: a worker's turn stays unkeyed, which is what
+   * keeps a restart from ever continuing it. Nothing is taken into a turn
+   * already stopping, or while the gateway stops.
+   */
+  const steerFor = (taskId: string) => async (turnSignal: AbortSignal): Promise<SteeredMessage | undefined> => {
+    const entry = followUps.get(taskId);
+    if (entry === undefined || !entry.open || entry.queued.length === 0 || turnSignal.aborted || isStopping()) {
+      return undefined;
+    }
+    const taken = entry.queued.splice(0);
+    log(`task ${taskId}: ${taken.length} follow-up(s) reached its worker at its next step`);
+    return {
+      userMessage: taken.map((followUp) => `${TASK_FOLLOW_UP_HEADER}\n${followUp.text}`).join(MERGED_SEPARATOR),
+      metadata: { [SENDER_TRUST_METADATA_KEY]: leastTrusted(...taken.map((followUp) => followUp.trust)) },
+    };
+  };
 
   const settler = createTaskSettler({
     tasks,
@@ -269,6 +334,12 @@ export const createBackgroundTasks = ({
       });
     },
     postFallback: (notice) => postToOrigin(notice),
+    // Only once the worker's turn has ended: until then, a follow-up still
+    // queued may yet be read.
+    unreadFollowUps: (taskId) => {
+      const entry = followUps.get(taskId);
+      return entry === undefined || entry.open ? [] : entry.queued;
+    },
     emit: (event) => bus.emit(event),
     warn,
   });
@@ -279,6 +350,8 @@ export const createBackgroundTasks = ({
       const settled = await settler.settle(taskId);
       if (settled.kind === 'open') {
         warn(`task ${taskId}: its worker's turn ended, but the worker session still says it is in flight; left for the next start.`);
+      } else {
+        followUps.delete(taskId);
       }
     } catch (error) {
       warn(`task ${taskId}: settling failed; the next start tries again (${reason(error)}).`);
@@ -315,6 +388,7 @@ export const createBackgroundTasks = ({
     const task = claim.task;
     controllers.set(task.id, controller);
     workers.set(task.workerSessionId, task.id);
+    followUps.set(task.id, { open: true, queued: [], keys: new Set() });
     // Before the worker is dispatched, so a consumer hears the start before
     // anything the worker does, and before its end.
     await bus.emit(taskEvent('task.started', task));
@@ -333,7 +407,7 @@ export const createBackgroundTasks = ({
           userMessage: prompt,
           metadata: { ...metadata, [TASK_ID_METADATA_KEY]: task.id },
           signal: controller.signal,
-        });
+        }, false, steerFor(task.id));
       } catch (error) {
         // How it ended is read from the worker session. This line is for a
         // start that failed before its turn began, which the session can't say.
@@ -341,6 +415,11 @@ export const createBackgroundTasks = ({
       } finally {
         controllers.delete(task.id);
         workers.delete(task.workerSessionId);
+        // Its turn reads nothing more: what is still queued is unread.
+        const entry = followUps.get(task.id);
+        if (entry !== undefined) {
+          entry.open = false;
+        }
       }
       await settleQuietly(task.id);
     }).catch((error: unknown) => {
@@ -500,8 +579,59 @@ export const createBackgroundTasks = ({
   };
 
   /**
-   * What `agent.tasks` and `agent.cancelTask` reach, scoped to the calling
-   * agent. A listed task's status is read live from its worker session
+   * `agent.messageTask`: queue a follow-up for a task's running turn, which
+   * takes it at its next tool step (`steerFor`).
+   *
+   * Only the agent's own task, and only from the conversation that started
+   * it: a task id seen in another conversation can't steer the work. A task
+   * that ended, whose turn ended, that a stop was asked for, or that no
+   * worker here is running (one the last process left) takes nothing, and
+   * says so. The same key twice is queued once, for the task's whole life
+   * here, so a call run again is not passed on again.
+   *
+   * Every check after the session read is made again against the row and
+   * the queue with nothing awaited before the push, so a follow-up is
+   * either queued while the turn can still read it or listed when it ends,
+   * never lost between the two.
+   */
+  const message = async ({ taskId, agentId, originSessionId, text, trust, key }: TaskMessageInput): Promise<TaskMessageAnswer> => {
+    if (isStopping()) {
+      throw refusal();
+    }
+    const row = tasks.get(taskId);
+    if (row === undefined || row.agentId !== agentId) {
+      return { kind: 'missing' };
+    }
+    if (row.originSessionId !== originSessionId) {
+      return { kind: 'elsewhere' };
+    }
+    const worker = await store.get(row.workerSessionId);
+    const current = tasks.get(taskId) ?? row;
+    const entry = followUps.get(taskId);
+    if (key !== undefined && entry?.keys.has(key) === true) {
+      return { kind: 'queued', status: liveTaskStatus(current, worker), already: true };
+    }
+    if (!isOpenTaskStatus(current.status)) {
+      return { kind: 'ended', status: current.status };
+    }
+    if (current.stoppedBy !== undefined) {
+      return { kind: 'stopping' };
+    }
+    const turnEnded = worker !== undefined && turnMessageOf(worker) !== undefined
+      && worker.status !== 'running' && worker.status !== 'pending_approval';
+    if (entry === undefined || !entry.open || turnEnded) {
+      return { kind: 'ended', status: liveTaskStatus(current, worker) };
+    }
+    if (key !== undefined) {
+      entry.keys.add(key);
+    }
+    entry.queued.push({ text, trust });
+    return { kind: 'queued', status: liveTaskStatus(current, worker) };
+  };
+
+  /**
+   * What `agent.tasks`, `agent.cancelTask` and `agent.messageTask` reach,
+   * scoped to the calling agent. A listed task's status is read live from its worker session
    * (`liveTaskStatus`): the row learns a parked worker or a finished turn
    * only when settling runs.
    */
@@ -533,6 +663,7 @@ export const createBackgroundTasks = ({
           return { kind: 'stopping', status: result.task.status, ...(result.already === true ? { already: true } : {}) };
       }
     },
+    message,
   };
 
   /**
