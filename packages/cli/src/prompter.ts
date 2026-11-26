@@ -94,6 +94,12 @@ interface SetupPrompter {
    */
   select(heading: string, options: string[], opts?: MenuOptions): Promise<MenuAnswer>;
   isClosed(): boolean;
+  /**
+   * Whether any answer was given: always at a terminal, and with piped input
+   * once a line arrived. Input that ends before its first line (`</dev/null`)
+   * chose nothing, so setup must not save it as a choice.
+   */
+  answered(): boolean;
   close(): void;
 }
 
@@ -315,6 +321,7 @@ export const createSetupPrompter = (
         return selectInteractive(heading, options, opts);
       },
       isClosed: () => closed,
+      answered: () => true,
       close: () => {
         // A resumed raw-mode stdin keeps the event loop alive; release it
         // so the process can exit once setup returns.
@@ -328,8 +335,10 @@ export const createSetupPrompter = (
   const readline = createInterface({ input, terminal: false });
   const pendingLines: string[] = [];
   let closed = false;
+  let anyLine = false;
 
   readline.on('line', (line) => {
+    anyLine = true;
     pendingLines.push(line);
   });
   readline.once('close', () => {
@@ -413,6 +422,7 @@ export const createSetupPrompter = (
       return selectPlain(heading, options, opts);
     },
     isClosed: () => closed && pendingLines.length === 0,
+    answered: () => anyLine,
     close: () => {
       readline.close();
     },
