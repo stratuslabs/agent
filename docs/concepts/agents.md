@@ -372,6 +372,16 @@ front:
   to hand longer work to a background task, so the soul does not have to say
   it. `effort:` applies to the front's model too.
 
+Put the front on an API runtime where you can: the Anthropic API with a
+key, or an OpenAI-compatible service. A Claude subscription runs through the
+Claude Code runtime, and `codex` through the Codex one, and both run every
+call through a CLI subprocess, so each quick reply waits on one starting.
+`front.provider` chooses another *provider* than the agent's own, for
+example the work on `codex` and the front on `anthropic`. It doesn't choose
+a sign-in: a front and a model on the same provider use the agent's one
+sign-in for it, so an agent signed in with a Claude subscription and no API
+key runs an `anthropic` front on Claude Code too.
+
 The model is always named: there is no hidden default, and
 `claude-haiku-5-5` is the suggested one. `stratus agents` and the control
 API's `GET /agents` show it. A `front.provider` or `front.model` that cannot
