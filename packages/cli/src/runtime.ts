@@ -36,6 +36,7 @@ import {
   BUILTIN_EXECUTOR_NAME,
   BUILTIN_MEMORY_STORE_NAME,
   createDemoTool,
+  toolsForRuntime,
   createFileCredentialResolver,
   credentialValuesFor,
   createHomeMemoryStore,
@@ -54,6 +55,7 @@ import {
   createPluginStateDirectories,
   createHostProtectedPaths,
   describeServingModel,
+  discoverConfigLocation,
   type RuntimeSelection,
   type RuntimeConfig,
   type IgnoredUntrustedConfig,
@@ -79,6 +81,29 @@ export const resolveRuntimeConfig = (
   command: RuntimeSelection & Partial<Omit<ParsedRunCommand, keyof RuntimeSelection>>,
   env: CliEnvironment = {},
 ): Promise<RuntimeConfig> => resolveStateRuntimeConfig(command, env);
+
+/**
+ * Says that discovery passed over a project config that won't load, and
+ * which file the run uses instead. Asked before the run resolves, not after,
+ * so it is said even when that run then fails for another reason: "no
+ * provider is configured" with nothing about the broken file in this folder
+ * would send someone to setup for the wrong problem. A global config that
+ * can't be read is the resolver's error to report, so nothing is said here.
+ */
+export const warnOnSkippedConfig = async (
+  selection: Pick<RuntimeSelection, 'configPath'>,
+  env: CliEnvironment,
+  streams: CliStreams,
+): Promise<void> => {
+  const { location, skipped } = await discoverConfigLocation(selection, env).catch(() => ({ location: undefined, skipped: undefined }));
+  if (skipped !== undefined) {
+    writeLine(
+      streams.stderr,
+      `Warning: skipping ${skipped.path}, which can't be used (${skipped.reason}). `
+        + `This run uses ${location?.path ?? 'the built-in defaults'} instead.`,
+    );
+  }
+};
 
 /**
  * Says, once the run is up, what an auto-discovered project config asked
@@ -436,7 +461,8 @@ export const createAgentRuntime = async (
     const unlistedTools = unlistedToolsFor(runEnv);
     const runner = new AgentRunner({
       provider: runtimeProvider,
-      tools,
+      // demo.echo only for the demo provider, which is what calls it.
+      tools: toolsForRuntime(tools, options.runtime),
       executor: executor ?? createLocalCommandExecutor(),
       approvals: createApprovalPolicy(
         approvalMode,

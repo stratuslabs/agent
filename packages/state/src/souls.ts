@@ -94,9 +94,13 @@ export const resolveConfiguredSoul = async (
   selection: RuntimeSelection,
   env: StateEnvironment = {},
 ): Promise<{ soul: ParsedSoul; path: string } | undefined> => {
-  const configLocation = await resolveConfigLocation(selection, env);
-  const fileConfig = configLocation ? await loadConfigFile(configLocation.path) : {};
-  const soulPath = resolveSoulPath(selection, env, fileConfig, configLocation?.trusted);
+  // A preset snapshot is read the way resolveRuntimeConfig reads it, so a
+  // caller holding one resolves the identity from the same read as the
+  // runtime instead of discovering again.
+  const preset = selection.presetConfig;
+  const configLocation = preset !== undefined ? undefined : await resolveConfigLocation(selection, env);
+  const fileConfig = preset?.config ?? (configLocation ? await loadConfigFile(configLocation.path) : {});
+  const soulPath = resolveSoulPath(selection, env, fileConfig, preset !== undefined ? preset.trusted : configLocation?.trusted);
   if (!soulPath) {
     return undefined;
   }

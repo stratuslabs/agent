@@ -41,11 +41,33 @@ const CHATGPT_SIGN_IN_FILENAME = 'chatgpt-sign-in.json';
 
 const CHATGPT_SIGN_IN_LOCK_FILENAME = 'chatgpt-sign-in.lock';
 
+const HOME_LOCK_FILENAME = 'stratusd.lock';
+
+const UPDATE_LOCK_FILENAME = 'update.lock';
+
 export const stratusHomePath = (env: StateEnvironment): string =>
   path.join(readHomeDirectory(env), STRATUS_HOME_DIRNAME);
 
 export const globalConfigPath = (env: StateEnvironment): string =>
   path.join(stratusHomePath(env), GLOBAL_CONFIG_FILENAME);
+
+/**
+ * `~/.stratus/stratusd.lock`: held by the daemon serving that home for its
+ * whole life (`claimHome` in the gateway). Here rather than beside the
+ * claim so a reader that only asks whether a daemon is there (doctor,
+ * health) need not load the gateway to find the file.
+ */
+export const homeLockPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), HOME_LOCK_FILENAME);
+
+/**
+ * `~/.stratus/update.lock`: held by `stratus update` from before it claims
+ * the home to migrate it until after it lets go. The home lock says only
+ * that something has the home; this says the something is an update, with
+ * the daemon stopped, so doctor and health do not report one running.
+ */
+export const updateLockPath = (env: StateEnvironment): string =>
+  path.join(stratusHomePath(env), UPDATE_LOCK_FILENAME);
 
 /**
  * `~/.stratus/grants.lock`: held while a grant file is read or rewritten

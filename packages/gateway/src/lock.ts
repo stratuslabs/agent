@@ -1,12 +1,7 @@
-import path from 'node:path';
+import { claimFileLock, FileLockHeldError, homeLockPath, type StateEnvironment } from '@stratusagent/state';
 
-import { claimFileLock, FileLockHeldError, stratusHomePath, type StateEnvironment } from '@stratusagent/state';
-
-const HOME_LOCK_FILENAME = 'stratusd.lock';
-
-/** `~/.stratus/stratusd.lock` — held by the daemon serving that home. */
-export const homeLockPath = (env: StateEnvironment): string =>
-  path.join(stratusHomePath(env), HOME_LOCK_FILENAME);
+/** `~/.stratus/stratusd.lock` — held by the daemon serving that home. Defined in state, where readers find it. */
+export { homeLockPath };
 
 /** Thrown by `claimHome` when another process holds the home. */
 export class HomeClaimedError extends Error {

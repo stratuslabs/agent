@@ -1,8 +1,10 @@
 # CLI reference
 
 Every command, then every flag. `stratus --help` prints the same surface;
-each command's behavior is documented in depth in the guide the table
-links to.
+`stratus <command> --help` (or `stratus help <command>`) prints only that
+command's usage, description and options, and a mistyped command prints
+the error and one line pointing there. Each command's behavior is
+documented in depth in the guide the table links to.
 
 ## Commands
 
@@ -175,7 +177,7 @@ stratus dashboard                      # local browser dashboard
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--env <VAR>` | `stratus credential set`: also bind the key to that variable for the `--agent` agent's shell, as `credential env` does |
 | `--remove` | `stratus credential env`: drop the binding instead of making it |
-| `--help`, `-h` | Show help |
+| `--help`, `-h` | Show help: after a command, only that command's |
 
 `stratus credential set` takes the value on **stdin and never in a flag** —
 a secret in argv is a secret in your shell history and in every `ps` on the

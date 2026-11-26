@@ -4,7 +4,7 @@ import {
   readProcessEnv,
   readWorkingDirectory,
   loadConfigFile,
-  resolveConfigLocation,
+  discoverConfigLocation,
   trustedConfigError,
 } from '@stratusagent/state';
 import {
@@ -105,11 +105,21 @@ export const runService = async (
       configToCheck = path.resolve(readWorkingDirectory(env), String(selectedConfig));
     } else {
       try {
-        configToCheck = (await resolveConfigLocation({}, env))?.path;
+        const { location, skipped } = await discoverConfigLocation({}, env);
+        configToCheck = location?.path;
+        if (skipped !== undefined) {
+          // Not a reason to refuse: the daemon skips it the same way. But
+          // whoever installs from this folder may well mean that file.
+          writeLine(
+            streams.stderr,
+            `Warning: skipping ${skipped.path}, which can't be used (${skipped.reason}). `
+              + `The daemon will skip it too and use ${location?.path ?? 'the built-in defaults'}; fix it or remove it.`,
+          );
+        }
       } catch (error) {
-        // Discovery throws when a candidate exists but cannot be read.
-        // Treating that as "no config" would install a daemon that hits
-        // the same error on its first dispatch.
+        // Discovery throws when the global config exists but cannot be
+        // read. Treating that as "no config" would install a daemon that
+        // hits the same error on its first dispatch.
         writeLine(streams.stderr, `Not installing: ${error instanceof Error ? error.message : String(error)}`);
         writeLine(streams.stderr, 'The daemon would fail the same way on startup. Fix the file, or move it aside.');
         return 1;
