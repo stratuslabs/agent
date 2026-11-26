@@ -259,8 +259,12 @@ export interface TaskSettleHost {
   appendFallback(notice: TaskNotice): Promise<unknown>;
   /** Post the fallback to the origin conversation, once, best-effort. Rejects when the channel refused it. */
   postFallback(notice: TaskNotice): Promise<void>;
-  /** The follow-ups the task's worker ended without reading, for the notice. None when the host keeps none. */
-  unreadFollowUps?(taskId: string): readonly TaskFollowUp[];
+  /**
+   * The follow-ups the task's worker ended without reading, for the notice,
+   * judged against `worker`, its session as settling read it. None when the
+   * host keeps none.
+   */
+  unreadFollowUps?(taskId: string, worker: Session | undefined): readonly TaskFollowUp[];
   /** Send a task event on the gateway's bus. */
   emit(event: TaskEvent): Promise<void>;
   now?(): string;
@@ -372,7 +376,7 @@ export const createTaskSettler = (host: TaskSettleHost) => {
       return dropped();
     }
     const quotesWorker = outcome.reply !== undefined || outcome.error !== undefined;
-    const unread = host.unreadFollowUps?.(taskId) ?? [];
+    const unread = host.unreadFollowUps?.(taskId, worker) ?? [];
     const base = {
       taskId,
       sessionId: task.originSessionId,

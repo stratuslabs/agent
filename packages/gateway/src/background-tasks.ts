@@ -48,9 +48,10 @@ import type { DispatchInput, GatewayOptions } from './types.ts';
 //
 // Follow-ups (`agent.messageTask`) wait in memory, per task, until the
 // worker's turn takes them at its next tool step through the same steer
-// hook a person's follow-up uses. Any its turn ended without reading are
-// listed in the outcome notice. A restart loses them with the task, which
-// is never run again; the conversation still holds the calls that sent them.
+// hook a person's follow-up uses. Any its turn ended without reading,
+// judged from its transcript, are listed in the outcome notice. A restart
+// loses them with the task, which is never run again; the conversation
+// still holds the calls that sent them.
 
 /** Open background tasks one agent may have unless `tasks.maxRunningPerAgent` names it. */
 export const DEFAULT_MAX_RUNNING_TASKS_PER_AGENT = 3;
@@ -117,15 +118,40 @@ export const TASK_FOLLOW_UP_HEADER = 'A follow-up about this task, from the conv
 
 /**
  * One task's follow-ups while its worker runs here: those its turn hasn't
- * taken yet, and every key ever queued, so the same call is passed on once.
- * `open` until the worker's turn ends; after that nothing is queued, and
- * what was never taken goes into the outcome notice.
+ * taken yet, those handed to it as one steered message each time, and
+ * every key queued, so the same call is passed on once. `open` until the
+ * worker's turn ends; after that nothing is queued, and what never reached
+ * the turn goes into the outcome notice (`unreadOf`).
  */
 interface FollowUps {
   open: boolean;
   queued: TaskFollowUp[];
+  handed: Array<{ message: string; followUps: TaskFollowUp[] }>;
   keys: Set<string>;
 }
+
+/**
+ * The follow-ups a worker's turn ended without reading: every batch handed
+ * to it whose steered message isn't in its transcript, then every one never
+ * handed over. A batch is handed over before the runner records it, and the
+ * turn can stop in between (an abort, a failed save), so being handed over
+ * isn't being read: only the transcript says that. Each steered message
+ * there accounts for one batch with the same text.
+ */
+const unreadOf = (entry: FollowUps, worker: Pick<Session, 'messages'> | undefined): TaskFollowUp[] => {
+  const recorded = (worker?.messages ?? [])
+    .filter((message) => message.role === 'user' && message.steered === true)
+    .map((message) => message.content);
+  const lost = entry.handed.flatMap((batch) => {
+    const at = recorded.indexOf(batch.message);
+    if (at < 0) {
+      return batch.followUps;
+    }
+    recorded.splice(at, 1);
+    return [];
+  });
+  return [...lost, ...entry.queued];
+};
 
 /** What background tasks close over in `createGateway`. */
 export interface BackgroundTasksDeps {
@@ -265,9 +291,12 @@ export const createBackgroundTasks = ({
       return undefined;
     }
     const taken = entry.queued.splice(0);
-    log(`task ${taskId}: ${taken.length} follow-up(s) reached its worker at its next step`);
+    const userMessage = taken.map((followUp) => `${TASK_FOLLOW_UP_HEADER}\n${followUp.text}`).join(MERGED_SEPARATOR);
+    // Unread until the transcript shows it: see `unreadOf`.
+    entry.handed.push({ message: userMessage, followUps: taken });
+    log(`task ${taskId}: ${taken.length} follow-up(s) handed to its worker at its next step`);
     return {
-      userMessage: taken.map((followUp) => `${TASK_FOLLOW_UP_HEADER}\n${followUp.text}`).join(MERGED_SEPARATOR),
+      userMessage,
       metadata: { [SENDER_TRUST_METADATA_KEY]: leastTrusted(...taken.map((followUp) => followUp.trust)) },
     };
   };
@@ -336,9 +365,9 @@ export const createBackgroundTasks = ({
     postFallback: (notice) => postToOrigin(notice),
     // Only once the worker's turn has ended: until then, a follow-up still
     // queued may yet be read.
-    unreadFollowUps: (taskId) => {
+    unreadFollowUps: (taskId, worker) => {
       const entry = followUps.get(taskId);
-      return entry === undefined || entry.open ? [] : entry.queued;
+      return entry === undefined || entry.open ? [] : unreadOf(entry, worker);
     },
     emit: (event) => bus.emit(event),
     warn,
@@ -388,7 +417,7 @@ export const createBackgroundTasks = ({
     const task = claim.task;
     controllers.set(task.id, controller);
     workers.set(task.workerSessionId, task.id);
-    followUps.set(task.id, { open: true, queued: [], keys: new Set() });
+    followUps.set(task.id, { open: true, queued: [], handed: [], keys: new Set() });
     // Before the worker is dispatched, so a consumer hears the start before
     // anything the worker does, and before its end.
     await bus.emit(taskEvent('task.started', task));
@@ -586,8 +615,8 @@ export const createBackgroundTasks = ({
    * it: a task id seen in another conversation can't steer the work. A task
    * that ended, whose turn ended, that a stop was asked for, or that no
    * worker here is running (one the last process left) takes nothing, and
-   * says so. The same key twice is queued once, for the task's whole life
-   * here, so a call run again is not passed on again.
+   * says so. While it still takes them, the same key twice is queued once,
+   * so a call run again is not passed on again.
    *
    * Every check after the session read is made again against the row and
    * the queue with nothing awaited before the push, so a follow-up is
@@ -608,9 +637,6 @@ export const createBackgroundTasks = ({
     const worker = await store.get(row.workerSessionId);
     const current = tasks.get(taskId) ?? row;
     const entry = followUps.get(taskId);
-    if (key !== undefined && entry?.keys.has(key) === true) {
-      return { kind: 'queued', status: liveTaskStatus(current, worker), already: true };
-    }
     if (!isOpenTaskStatus(current.status)) {
       return { kind: 'ended', status: current.status };
     }
@@ -621,6 +647,9 @@ export const createBackgroundTasks = ({
       && worker.status !== 'running' && worker.status !== 'pending_approval';
     if (entry === undefined || !entry.open || turnEnded) {
       return { kind: 'ended', status: liveTaskStatus(current, worker) };
+    }
+    if (key !== undefined && entry.keys.has(key)) {
+      return { kind: 'queued', status: liveTaskStatus(current, worker), already: true };
     }
     if (key !== undefined) {
       entry.keys.add(key);

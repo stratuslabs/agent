@@ -389,7 +389,7 @@ const hostFixture = async ({ holdAfterFinish = false }: { holdAfterFinish?: bool
         return session;
       }
       steer = workerSteer;
-      const worker = await store.create({
+      await store.create({
         id: input.sessionId,
         agent: { id: 'ava', name: 'Ava' },
         status: 'running',
@@ -397,7 +397,9 @@ const hostFixture = async ({ holdAfterFinish = false }: { holdAfterFinish?: bool
         messages: [{ id: 'w1', role: 'user', content: input.userMessage, createdAt: '' }],
       } as unknown as Session);
       await finished;
-      worker.messages.push({ id: 'w2', role: 'assistant', content: 'done', createdAt: '' });
+      // Read again: a steered message may have been recorded since.
+      const worker = (await store.get(input.sessionId))!;
+      worker.messages.push({ id: `w${worker.messages.length + 1}`, role: 'assistant', content: 'done', createdAt: '' });
       worker.status = 'completed';
       await store.save(worker);
       // Finished and saved, but its dispatch not yet back: not settled.
@@ -428,7 +430,20 @@ const hostFixture = async ({ holdAfterFinish = false }: { holdAfterFinish?: bool
     tasks,
     task: started.task,
     origin,
-    steer: (signal = new AbortController().signal) => steer!(signal),
+    /**
+     * Ask the worker's steer hook, as the runner does at a tool step, and
+     * record what it hands over the way the runner's `takeSteered` does,
+     * unless `recorded` is false: the turn stopped between the two.
+     */
+    steer: async (signal = new AbortController().signal, recorded = true): Promise<SteeredMessage | undefined> => {
+      const taken = await steer!(signal);
+      if (taken !== undefined && recorded) {
+        const worker = (await store.get(rows.get(started.task)!.workerSessionId))!;
+        worker.messages.push({ id: `w${worker.messages.length + 1}`, role: 'user', content: taken.userMessage, createdAt: '', steered: true });
+        await store.save(worker);
+      }
+      return taken;
+    },
     finish,
     release: () => release(),
     workerDone: () => until('the worker turn to finish', async () => (await store.get(rows.get(started.task)!.workerSessionId))?.status === 'completed'),
@@ -501,13 +516,50 @@ test('the host refuses another agent\'s task, another conversation, and an unkno
 test('a task whose turn has ended takes nothing, even before it is settled', async () => {
   const f = await hostFixture({ holdAfterFinish: true });
   try {
+    const early = { taskId: f.task, agentId: 'ava', originSessionId: f.origin, text: 'in time', trust: 'agent' as const, key: 'm1#a' };
+    assert.deepEqual(await f.tasks.toolsHost!.message(early), { kind: 'queued', status: 'running' });
     f.finish();
     await f.workerDone();
     const answer = await f.tasks.toolsHost!.message({ taskId: f.task, agentId: 'ava', originSessionId: f.origin, text: 'too late', trust: 'agent' });
     assert.deepEqual(answer, { kind: 'ended', status: 'completed' }, 'how it ended, from the worker, though the row still says running');
+    assert.deepEqual(await f.tasks.toolsHost!.message(early), { kind: 'ended', status: 'completed' }, 'a repeat now says it ended, since it was never read');
     f.release();
     await f.settled();
-    assert.doesNotMatch(await f.notice(), /too late/, 'it was refused, not queued and listed');
+    const text = await f.notice();
+    assert.doesNotMatch(text, /too late/, 'it was refused, not queued and listed');
+    assert.match(text, /\n1 follow-up sent with agent\.messageTask never reached it, because it ended first:\n- in time\]$/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('follow-ups handed to a turn that stopped before recording them are listed as unread, not lost', async () => {
+  const f = await hostFixture();
+  try {
+    const send = (key: string, text: string) => f.tasks.toolsHost!.message({ taskId: f.task, agentId: 'ava', originSessionId: f.origin, text, trust: 'agent', key });
+    await send('m1#a', 'first, read');
+    assert.ok(await f.steer(), 'the first is taken and recorded');
+    await send('m2#b', 'second, handed over but never recorded');
+    assert.ok(await f.steer(undefined, false), 'the second is handed over, and the turn stops before it records it');
+    await send('m3#c', 'third, never taken');
+    f.finish();
+    await f.settled();
+    const text = await f.notice();
+    assert.match(text, /\n2 follow-ups sent with agent\.messageTask never reached it, because it ended first:\n- second, handed over but never recorded\n- third, never taken\]$/);
+    assert.doesNotMatch(text, /first, read/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a repeat of a call after its task ended says it ended, not that it was passed on', async () => {
+  const f = await hostFixture();
+  try {
+    const send = () => f.tasks.toolsHost!.message({ taskId: f.task, agentId: 'ava', originSessionId: f.origin, text: 'hi', trust: 'agent', key: 'm1#a' });
+    assert.deepEqual(await send(), { kind: 'queued', status: 'running' });
+    f.finish();
+    await f.settled();
+    assert.deepEqual(await send(), { kind: 'ended', status: 'completed' });
   } finally {
     await f.close();
   }
