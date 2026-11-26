@@ -17,7 +17,7 @@ import {
   type MemoryEntry,
 } from '@stratusagent/core';
 
-import { createFileMemoryStore, DEFAULT_STRATUS_AGENT, withLegacyDefaultMemories } from '../src/index.ts';
+import { createFileMemoryStore, LEGACY_DEFAULT_AGENT_ID, withLegacyDefaultMemories } from '../src/index.ts';
 
 const tempDir = () => mkdtemp(path.join(os.tmpdir(), 'stratus-memory-quality-'));
 const newFile = async (): Promise<string> => path.join(await tempDir(), 'memory.jsonl');
@@ -604,7 +604,7 @@ test('the pinned core is one budget for an agent’s legacy aliases, not one eac
   // otherwise accept its own 2 KiB of pins — and the merged set would then
   // be trimmed by recency in the injected slice, which is the silent
   // eviction the cap promises never happens.
-  const current = await store.append(DEFAULT_STRATUS_AGENT.id, 'a'.repeat(1400));
+  const current = await store.append(LEGACY_DEFAULT_AGENT_ID, 'a'.repeat(1400));
   await appendFile(filePath, `${JSON.stringify({
     id: 'demo-agent:memory:legacy',
     agentId: 'demo-agent',
@@ -612,22 +612,22 @@ test('the pinned core is one budget for an agent’s legacy aliases, not one eac
     createdAt: '2026-01-01T00:00:00.000Z',
   })}\n`);
 
-  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, current.id)).pinned, true);
+  assert.equal((await store.pin!(LEGACY_DEFAULT_AGENT_ID, current.id)).pinned, true);
   // The alias store would accept this one against its own empty budget, so
   // the wrapper has to refuse on the merged total — telling the caller it
   // was pinned when the merged replay makes it inert is the eviction the
   // cap promises never happens, wearing a different hat.
-  const refused = await store.pin!(DEFAULT_STRATUS_AGENT.id, 'demo-agent:memory:legacy');
+  const refused = await store.pin!(LEGACY_DEFAULT_AGENT_ID, 'demo-agent:memory:legacy');
   assert.equal(refused.pinned, false);
   assert.match(refused.reason ?? '', new RegExp(`capped at ${MEMORY_PINNED_MAX_BYTES} UTF-8 bytes`));
 
-  const pinned = await store.pinned!(DEFAULT_STRATUS_AGENT.id);
+  const pinned = await store.pinned!(LEGACY_DEFAULT_AGENT_ID);
   const bytes = pinned.reduce((sum, entry) => sum + memoryContentByteLength(entry.content), 0);
   assert.ok(bytes <= MEMORY_PINNED_MAX_BYTES, `the merged pinned core held ${bytes} bytes`);
   assert.deepEqual(pinned.map((entry) => entry.id), [current.id]);
   // And the slice takes it as given rather than trimming it, which is what
   // "refuses rather than evicts" has to mean once the merge is in play.
-  const injection = await buildMemoryInjection(store, DEFAULT_STRATUS_AGENT.id);
+  const injection = await buildMemoryInjection(store, LEGACY_DEFAULT_AGENT_ID);
   assert.deepEqual(injection.pinned.map((entry) => entry.id), [current.id]);
 });
 
@@ -744,9 +744,9 @@ test('the merged alias budget counts a superseded pin, which the aliases still r
   // reserving its bytes, so the wrapper must see them too — a merged budget
   // that asked only for what renders would hand the space to a legacy pin
   // and drop it again the moment the successor was forgotten.
-  const held = await store.append(DEFAULT_STRATUS_AGENT.id, 'a'.repeat(1500));
-  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, held.id)).pinned, true);
-  const successor = await store.append(DEFAULT_STRATUS_AGENT.id, 'the replacement', { supersedes: held.id });
+  const held = await store.append(LEGACY_DEFAULT_AGENT_ID, 'a'.repeat(1500));
+  assert.equal((await store.pin!(LEGACY_DEFAULT_AGENT_ID, held.id)).pinned, true);
+  const successor = await store.append(LEGACY_DEFAULT_AGENT_ID, 'the replacement', { supersedes: held.id });
   await appendFile(filePath, `${JSON.stringify({
     id: 'demo-agent:memory:legacy',
     agentId: 'demo-agent',
@@ -754,16 +754,16 @@ test('the merged alias budget counts a superseded pin, which the aliases still r
     createdAt: '2026-01-01T00:00:00.000Z',
   })}\n`);
 
-  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id), []);
-  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, 'demo-agent:memory:legacy')).pinned, false);
+  assert.deepEqual(await store.pinned!(LEGACY_DEFAULT_AGENT_ID), []);
+  assert.equal((await store.pin!(LEGACY_DEFAULT_AGENT_ID, 'demo-agent:memory:legacy')).pinned, false);
   // And the reserved one is visible to an operator under `allocated`.
   assert.deepEqual(
-    (await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' })).map((entry) => entry.id),
+    (await store.pinned!(LEGACY_DEFAULT_AGENT_ID, { include: 'allocated' })).map((entry) => entry.id),
     [held.id],
   );
   // Forgetting the successor brings it back with nothing displaced.
-  assert.equal(await store.forget(DEFAULT_STRATUS_AGENT.id, successor.id), true);
-  assert.deepEqual((await store.pinned!(DEFAULT_STRATUS_AGENT.id)).map((entry) => entry.id), [held.id]);
+  assert.equal(await store.forget(LEGACY_DEFAULT_AGENT_ID, successor.id), true);
+  assert.deepEqual((await store.pinned!(LEGACY_DEFAULT_AGENT_ID)).map((entry) => entry.id), [held.id]);
 });
 
 test('an inherited legacy memory can be superseded, by the id recall handed out', async () => {
@@ -781,15 +781,15 @@ test('an inherited legacy memory can be superseded, by the id recall handed out'
   // tells the model to supersede by recalled id — so the revision has to be
   // filed where the fact it retires lives, or every inherited fact is
   // unrevisable.
-  const recalled = (await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy')).entries[0]!;
+  const recalled = (await store.search(LEGACY_DEFAULT_AGENT_ID, 'deploy')).entries[0]!;
   assert.equal(recalled.id, 'demo-agent:memory:1');
-  const revision = await store.append(DEFAULT_STRATUS_AGENT.id, 'the deploy runs on Postgres', { supersedes: recalled.id });
+  const revision = await store.append(LEGACY_DEFAULT_AGENT_ID, 'the deploy runs on Postgres', { supersedes: recalled.id });
 
-  assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.content), ['the deploy runs on Postgres']);
-  assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'deploy')).entries.map((entry) => entry.id), [revision.id]);
+  assert.deepEqual((await store.list(LEGACY_DEFAULT_AGENT_ID)).entries.map((entry) => entry.content), ['the deploy runs on Postgres']);
+  assert.deepEqual((await store.search(LEGACY_DEFAULT_AGENT_ID, 'deploy')).entries.map((entry) => entry.id), [revision.id]);
   // An id belonging to nobody still refuses, in the store's own words.
   await assert.rejects(
-    () => store.append(DEFAULT_STRATUS_AGENT.id, 'not mine', { supersedes: 'someone:else:1' }),
+    () => store.append(LEGACY_DEFAULT_AGENT_ID, 'not mine', { supersedes: 'someone:else:1' }),
     /belongs to this agent/,
   );
 });
@@ -833,37 +833,37 @@ test('one id under two aliases resolves to one entry, the earlier alias winning'
   // could not keep.
   await writeFile(filePath, [
     JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
-    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-02T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the current copy of the rota', createdAt: '2026-01-02T00:00:00.000Z' }),
     '',
   ].join('\n'));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
 
-  const listed = (await store.list(DEFAULT_STRATUS_AGENT.id)).entries;
+  const listed = (await store.list(LEGACY_DEFAULT_AGENT_ID)).entries;
   assert.deepEqual(listed.map((entry) => entry.content), ['the current copy of the rota']);
-  assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'rota')).entries.map((entry) => entry.id), ['shared:1']);
+  assert.deepEqual((await store.search(LEGACY_DEFAULT_AGENT_ID, 'rota')).entries.map((entry) => entry.id), ['shared:1']);
   // Precedence belongs to the id, not to the query: a query that matches
   // only the inherited copy must not recall it, or the model would revise
   // a fact it never read — every id-based mutation resolves to the current
   // copy, which is the one `list` showed.
-  assert.deepEqual((await store.search(DEFAULT_STRATUS_AGENT.id, 'inherited')).entries, []);
+  assert.deepEqual((await store.search(LEGACY_DEFAULT_AGENT_ID, 'inherited')).entries, []);
   assert.deepEqual(
-    (await store.search(DEFAULT_STRATUS_AGENT.id, 'current')).entries.map((entry) => entry.content),
+    (await store.search(LEGACY_DEFAULT_AGENT_ID, 'current')).entries.map((entry) => entry.content),
     ['the current copy of the rota'],
   );
   // The audit read keeps both, because saying what the record holds is the
   // one job it has.
-  assert.equal((await store.audit(DEFAULT_STRATUS_AGENT.id)).filter((entry) => entry.id === 'shared:1').length, 2);
+  assert.equal((await store.audit(LEGACY_DEFAULT_AGENT_ID)).filter((entry) => entry.id === 'shared:1').length, 2);
   // And the mutators reach the one the reads showed. Unpinning is the
   // exception that proves the rule: it clears every alias, because the
   // merged view says the id is one entry and a pin left under the other
   // would go on holding budget with nothing admitting it.
-  assert.equal((await store.pin!(DEFAULT_STRATUS_AGENT.id, 'shared:1')).pinned, true);
-  assert.deepEqual((await store.pinned!(DEFAULT_STRATUS_AGENT.id)).map((entry) => entry.content), ['the current copy of the rota']);
-  assert.equal(await store.unpin!(DEFAULT_STRATUS_AGENT.id, 'shared:1'), true);
-  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' }), []);
+  assert.equal((await store.pin!(LEGACY_DEFAULT_AGENT_ID, 'shared:1')).pinned, true);
+  assert.deepEqual((await store.pinned!(LEGACY_DEFAULT_AGENT_ID)).map((entry) => entry.content), ['the current copy of the rota']);
+  assert.equal(await store.unpin!(LEGACY_DEFAULT_AGENT_ID, 'shared:1'), true);
+  assert.deepEqual(await store.pinned!(LEGACY_DEFAULT_AGENT_ID, { include: 'allocated' }), []);
 
-  assert.equal(await store.forget(DEFAULT_STRATUS_AGENT.id, 'shared:1'), true);
-  assert.deepEqual((await store.list(DEFAULT_STRATUS_AGENT.id)).entries.map((entry) => entry.content), ['the inherited copy of the rota']);
+  assert.equal(await store.forget(LEGACY_DEFAULT_AGENT_ID, 'shared:1'), true);
+  assert.deepEqual((await store.list(LEGACY_DEFAULT_AGENT_ID)).entries.map((entry) => entry.content), ['the inherited copy of the rota']);
 });
 
 test('the current owner of an id wins a bounded list even when its own window dropped it', async () => {
@@ -875,19 +875,19 @@ test('the current owner of an id wins a bounded list even when its own window dr
   // first alias that *holds* it, and the difference here injects content
   // that forget, pin, and supersession all resolve somewhere else.
   await writeFile(filePath, [
-    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
-    JSON.stringify({ id: 'stratus:memory:2', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rookery survey is quarterly', createdAt: '2026-02-01T00:00:00.000Z' }),
-    JSON.stringify({ id: 'stratus:memory:3', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the deploy runs on Postgres', createdAt: '2026-03-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'stratus:memory:2', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the rookery survey is quarterly', createdAt: '2026-02-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'stratus:memory:3', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the deploy runs on Postgres', createdAt: '2026-03-01T00:00:00.000Z' }),
     JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-05-01T00:00:00.000Z' }),
     '',
   ].join('\n'));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
 
-  const listed = await store.list(DEFAULT_STRATUS_AGENT.id, { limit: 2 });
+  const listed = await store.list(LEGACY_DEFAULT_AGENT_ID, { limit: 2 });
   assert.deepEqual(listed.entries.map((entry) => entry.id), ['stratus:memory:2', 'stratus:memory:3']);
   assert.equal(listed.truncated, true);
   // And the prompt the agent actually gets carries the same answer.
-  const prompt = await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id);
+  const prompt = await injectedPrompt(store, LEGACY_DEFAULT_AGENT_ID);
   assert.ok(prompt.includes('the current copy of the rota'));
   assert.ok(!prompt.includes('the inherited copy of the rota'));
 });
@@ -901,8 +901,8 @@ test('a bounded search refills an alias whose whole batch the current owner shad
   // alias was asked for, and reporting `truncated` over an empty page hides
   // a fact the single-alias path would have returned.
   await writeFile(filePath, [
-    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z' }),
-    JSON.stringify({ id: 'shared:2', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the deploy runs on Postgres', createdAt: '2026-01-02T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:2', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the deploy runs on Postgres', createdAt: '2026-01-02T00:00:00.000Z' }),
     JSON.stringify({ id: 'demo-agent:memory:3', agentId: 'demo-agent', content: 'the rookery survey is quarterly', createdAt: '2026-02-01T00:00:00.000Z' }),
     JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the rookery gate code changed', createdAt: '2026-03-01T00:00:00.000Z' }),
     JSON.stringify({ id: 'shared:2', agentId: 'demo-agent', content: 'the rookery path floods', createdAt: '2026-04-01T00:00:00.000Z' }),
@@ -910,7 +910,7 @@ test('a bounded search refills an alias whose whole batch the current owner shad
   ].join('\n'));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
 
-  const found = await store.search(DEFAULT_STRATUS_AGENT.id, 'rookery', { limit: 2 });
+  const found = await store.search(LEGACY_DEFAULT_AGENT_ID, 'rookery', { limit: 2 });
   assert.deepEqual(found.entries.map((entry) => entry.id), ['demo-agent:memory:3']);
   assert.equal(found.truncated, false);
 });
@@ -923,19 +923,19 @@ test('the topic index follows the same id precedence every other read does', asy
   // reaches past the block — drags the topic's trust down to `external`,
   // which the runner folds into the taint of the whole session.
   await writeFile(filePath, [
-    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z', about: ['rota'], trust: 'agent' }),
+    JSON.stringify({ id: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z', about: ['rota'], trust: 'agent' }),
     JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'a page said the rota moved', createdAt: '2026-02-01T00:00:00.000Z', about: ['rota', 'scraped-page'], trust: 'external' }),
     JSON.stringify({ id: 'demo-agent:memory:2', agentId: 'demo-agent', content: 'the rookery survey is quarterly', createdAt: '2026-03-01T00:00:00.000Z', about: ['rookery'], trust: 'agent' }),
     '',
   ].join('\n'));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
 
-  const topics = await store.topics!(DEFAULT_STRATUS_AGENT.id);
+  const topics = await store.topics!(LEGACY_DEFAULT_AGENT_ID);
   assert.deepEqual(topics.map((topic) => [topic.name, topic.count, topic.trust]), [
     ['rookery', 1, 'agent'],
     ['rota', 1, 'agent'],
   ]);
-  assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('scraped-page'));
+  assert.ok(!(await injectedPrompt(store, LEGACY_DEFAULT_AGENT_ID)).includes('scraped-page'));
 });
 
 test('a pin refuses while an inert pin stands in front of it, however small it is', async () => {
@@ -977,16 +977,16 @@ test('the pinned core follows id precedence even though a pin read cannot see th
   // legacy copy, and de-duplicating the batches alone would put inherited
   // content into the one block the agent always reads.
   await writeFile(filePath, [
-    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z' }),
     JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-02-01T00:00:00.000Z' }),
     JSON.stringify({ pins: 'shared:1', agentId: 'demo-agent', pinned: true, createdAt: '2026-03-01T00:00:00.000Z' }),
     '',
   ].join('\n'));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
 
-  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id), []);
-  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' }), []);
-  const prompt = await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id);
+  assert.deepEqual(await store.pinned!(LEGACY_DEFAULT_AGENT_ID), []);
+  assert.deepEqual(await store.pinned!(LEGACY_DEFAULT_AGENT_ID, { include: 'allocated' }), []);
+  const prompt = await injectedPrompt(store, LEGACY_DEFAULT_AGENT_ID);
   assert.ok(prompt.includes('the current copy of the rota'));
   assert.ok(!prompt.includes('the inherited copy of the rota'));
 });
@@ -998,14 +998,14 @@ test('a legacy alias alone in the topic index is not evidence that it owns the i
   // contribute?" therefore saw one list and took it — handing the prompt a
   // topic from the copy every other read hides, at the hidden copy's trust.
   await writeFile(filePath, [
-    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z', trust: 'agent' }),
+    JSON.stringify({ id: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the rota is on Tuesdays', createdAt: '2026-01-01T00:00:00.000Z', trust: 'agent' }),
     JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'a page said the rota moved', createdAt: '2026-02-01T00:00:00.000Z', about: ['scraped-page'], trust: 'external' }),
     '',
   ].join('\n'));
   const store = withLegacyDefaultMemories(createFileMemoryStore(filePath, frozen()));
 
-  assert.deepEqual(await store.topics!(DEFAULT_STRATUS_AGENT.id), []);
-  assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('scraped-page'));
+  assert.deepEqual(await store.topics!(LEGACY_DEFAULT_AGENT_ID), []);
+  assert.ok(!(await injectedPrompt(store, LEGACY_DEFAULT_AGENT_ID)).includes('scraped-page'));
 });
 
 test('a pin is current by its owning copy, not by whichever alias holds one', async () => {
@@ -1015,9 +1015,9 @@ test('a pin is current by its owning copy, not by whichever alias holds one', as
   // set pooled across the aliases — so the legacy copy, which is current,
   // answered for it and the expired content reached the pinned core.
   await writeFile(filePath, [
-    JSON.stringify({ id: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z', validUntil: '2026-03-01T00:00:00.000Z' }),
+    JSON.stringify({ id: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, content: 'the current copy of the rota', createdAt: '2026-01-01T00:00:00.000Z', validUntil: '2026-03-01T00:00:00.000Z' }),
     JSON.stringify({ id: 'shared:1', agentId: 'demo-agent', content: 'the inherited copy of the rota', createdAt: '2026-01-02T00:00:00.000Z' }),
-    JSON.stringify({ pins: 'shared:1', agentId: DEFAULT_STRATUS_AGENT.id, pinned: true, createdAt: '2026-01-03T00:00:00.000Z' }),
+    JSON.stringify({ pins: 'shared:1', agentId: LEGACY_DEFAULT_AGENT_ID, pinned: true, createdAt: '2026-01-03T00:00:00.000Z' }),
     JSON.stringify({ pins: 'shared:1', agentId: 'demo-agent', pinned: true, createdAt: '2026-01-04T00:00:00.000Z' }),
     '',
   ].join('\n'));
@@ -1025,11 +1025,11 @@ test('a pin is current by its owning copy, not by whichever alias holds one', as
 
   // Expired on the copy that owns the id, so nothing renders — one rule,
   // both bounds, the pinned core included.
-  assert.deepEqual(await store.pinned!(DEFAULT_STRATUS_AGENT.id), []);
+  assert.deepEqual(await store.pinned!(LEGACY_DEFAULT_AGENT_ID), []);
   // It still holds its budget, which is a property of the record.
   assert.deepEqual(
-    (await store.pinned!(DEFAULT_STRATUS_AGENT.id, { include: 'allocated' })).map((entry) => entry.content),
+    (await store.pinned!(LEGACY_DEFAULT_AGENT_ID, { include: 'allocated' })).map((entry) => entry.content),
     ['the current copy of the rota'],
   );
-  assert.ok(!(await injectedPrompt(store, DEFAULT_STRATUS_AGENT.id)).includes('inherited copy'));
+  assert.ok(!(await injectedPrompt(store, LEGACY_DEFAULT_AGENT_ID)).includes('inherited copy'));
 });

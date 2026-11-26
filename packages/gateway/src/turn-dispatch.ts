@@ -39,7 +39,7 @@ export interface TurnDispatchDeps {
   env: StateEnvironment;
   store: ShardedSessionStore;
   getSelectedExecutor: () => Executor | undefined;
-  defaultAgentId: () => Promise<string>;
+  defaultAgentId: () => Promise<string | undefined>;
   refreshAgent: (agentId: string) => Promise<AgentSource>;
   runtimeContextFor: (
     source: AgentSource,
@@ -127,6 +127,14 @@ export const createTurnDispatch = ({
     // because whether this turn streams depends on durable session state.)
     const existing = await store.get(input.sessionId);
     const agentId = input.agentId ?? existing?.agent.id ?? await defaultAgentId();
+    if (agentId === undefined) {
+      // No agent lives in code to answer for nobody: the turn says what is
+      // missing instead of being answered by a persona no one made.
+      throw new Error(
+        'No agent to answer this turn: it names none and no default agent is set. '
+        + 'Create one with `stratus setup` or `stratus agent new`, or name the agent to talk to.',
+      );
+    }
     const source = await refreshAgent(agentId);
     const agent = subAgent ?? source.definition;
     if (subAgent !== undefined && existing) {

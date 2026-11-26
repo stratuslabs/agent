@@ -1,5 +1,6 @@
 import { CREDENTIAL_NAME_PATTERN } from '@stratusagent/state';
 import type { CliEnvironment } from './environment.ts';
+import { helpTopic } from './help.ts';
 import type { ParsedHelpCommand } from './parse/shared.ts';
 import {
   parseChatCommand,
@@ -119,6 +120,12 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   const [command, ...rest] = argv;
 
   if (!command || command === 'help' || command === '--help' || command === '-h') {
+    // `stratus help <command>` for a command the help does not know is
+    // the same mistake as running it.
+    const [topic] = rest;
+    if (command === 'help' && topic !== undefined && !topic.startsWith('-') && helpTopic(rest) === undefined) {
+      throw new Error(`Unknown command: ${rest.join(' ')}`);
+    }
     return { command: 'help' };
   }
 
@@ -128,7 +135,17 @@ export const parseCommand = (argv: string[], env: CliEnvironment = {}): ParsedCo
   // it through `update --check` was the only way to see it, which asks npm
   // over the network to answer a question about this machine.
   if (command === 'version' || command === '--version' || command === '-v') {
+    // Its help, like any command's; the version is one word away.
+    if (command === 'version' && (rest[0] === '--help' || rest[0] === '-h')) {
+      return { command: 'help' };
+    }
     return { command: 'version' };
+  }
+
+  // `schedule` and `plugin` are commands only with an action after them
+  // (`schedule list`), but their help is the family's, like `skill --help`.
+  if ((command === 'schedule' || command === 'plugin') && (rest[0] === '--help' || rest[0] === '-h')) {
+    return { command: 'help' };
   }
 
   if (command === 'dashboard') {

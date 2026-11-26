@@ -1,8 +1,10 @@
 # CLI reference
 
 Every command, then every flag. `stratus --help` prints the same surface;
-each command's behavior is documented in depth in the guide the table
-links to.
+`stratus <command> --help` (or `stratus help <command>`) prints only that
+command's usage, description and options, and a mistyped command prints
+the error and one line pointing there. Each command's behavior is
+documented in depth in the guide the table links to.
 
 ## Commands
 
@@ -139,6 +141,7 @@ stratus dashboard                      # local browser dashboard
 | `--instructions` | `agent new`: the agent's persona/instructions |
 | `--idle-timeout` | `stratus serve`: seconds of provider silence before the watchdog aborts a turn (default 120) |
 | `--no-events` | Hide the event log |
+| `--events` | `stratus chat`: print every event of a turn as it happens, not only the tools it uses |
 | `--no-log-file` | `stratus serve`: do not write `~/.stratus/logs/stratusd.jsonl` |
 | `--log-format` | `stratus serve`: `text` (default) — human lines on stdout — or `json`: every record written to the log file, also written to stdout as one JSON line, and nothing else there. For `docker logs`, journald, and log shippers; see [Logs](../guides/logs.md#logs-on-stdout-for-a-container-or-journald) |
 | `--held` | `stratus serve`: start held. State migrations run, the roster loads, and the control API answers health (`"held": true`), but no conversation channel connects, no schedule fires, no parked approval is re-asked, and new messages are refused, until `POST /api/v1/promote`. For an upgrade that has to prove the new version healthy before it touches any work. A daemon an announced restart brings up is never held; one a service manager restarts with the same command is, and waits to be promoted again |
@@ -148,8 +151,8 @@ stratus dashboard                      # local browser dashboard
 | `--api-host` | `stratus serve`: control API interface (default `127.0.0.1`) |
 | `--api-port` | `stratus serve`: control API port (default `4123`; `0` picks any free port). A port the daemon cannot bind stops it — it does not serve without the API |
 | `--events-host` | `stratus serve`: events listener interface (default `127.0.0.1`, or the config's `events.listen.host`). The listener runs only when the config's `events` block names a source; see [Events](../guides/events.md) |
-| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `sessions`, `grants`, `health`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
-| `--tool`, `--scope`, `--origin` | `stratus grants revoke`: which grant goes — exactly one of them |
+| `--gateway <url>` | `stratus agents`, `skill reload`, `restart`, `session rollover`, `sessions`, `tasks`, `grants`, `health`, `events`: a running daemon's control API (all but `agents` default to the daemon `~/.stratus/gateway.json` names; `grants` reads the files instead when none is serving) |
+| `--tool`, `--scope`, `--origin`, `--destination` | `stratus grants revoke`: which grant goes, exactly one of them: a tool name, a command scope, a site's origin, or a conversation as `<channel:id>` |
 | `--trust <level>` | `stratus memory list`: show only entries at this label. `stratus memory reassert`: the label to record — `user`, `agent`, `unknown`, or `external` |
 | `--all-unknown` | `stratus memory reassert`: every live entry with no recorded origin, the upgrade case; ids may be given as well |
 | `--limit <n>` | `stratus memory search`: maximum hits. The store bounds the read either way. `stratus sessions`: how many to list, newest first (default 20). `stratus memory passes`: how many, newest first (default 20) |
@@ -162,9 +165,11 @@ stratus dashboard                      # local browser dashboard
 | `--version`, `-v` | Print this build's version and exit — reads nothing but itself, so it answers offline and before any state migration |
 | `--token` | Bearer token for `--gateway` (default: `~/.stratus/gateway-token`, or `STRATUS_GATEWAY_TOKEN`) |
 | `--no-login` | `stratus service install`: install without the start-at-login trigger |
+| `--live` | `stratus doctor`: also ask each provider your runs use whether it accepts the key |
+| `--check` | `stratus update`: report what it would do without doing any of it; exits 1 when something is actionable |
 | `-f`, `--follow` | `stratus logs`: follow the log, across rotations |
-| `-n <count>` | `stratus logs`: how much backlog to print (default 50) |
-| `--agent` | `stratus logs`: show only one agent's records. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `credential env` (and `credential set --env`): the agent whose shell the binding is for (required). `signin set` / `signin remove`: the agent whose own sign-in it is (required). `channel set` / `channel remove`: the agent whose binding it is (required). `people add` / `people remove`: that agent's own list rather than the shared one |
+| `-n`, `--lines <count>` | `stratus logs`: how much backlog to print (default 50) |
+| `--agent` | `stratus logs`: show only one agent's records. `sessions` / `tasks`: only that agent's. `skill add`: also enable the installed skills in that agent's soul. `credential set` / `credential remove`: that agent's own entry rather than the fleet's shared one. `credential env` (and `credential set --env`): the agent whose shell the binding is for (required). `signin set` / `signin remove`: the agent whose own sign-in it is (required). `channel set` / `channel remove`: the agent whose binding it is (required). `people add` / `people remove`: that agent's own list rather than the shared one |
 | `--approver` | `stratus people add`: as an approver as well as a teammate. `stratus people remove`: take away approving only |
 | `--session` | `stratus logs`: show only one session's records |
 | `--skill <id>` | `stratus skill add`: pick one skill from a multi-skill repo (repeatable) |
@@ -175,7 +180,7 @@ stratus dashboard                      # local browser dashboard
 | `--drain-timeout <seconds>` | `stratus restart`: how long in-flight turns get to finish before they are aborted (default 30) |
 | `--env <VAR>` | `stratus credential set`: also bind the key to that variable for the `--agent` agent's shell, as `credential env` does |
 | `--remove` | `stratus credential env`: drop the binding instead of making it |
-| `--help`, `-h` | Show help |
+| `--help`, `-h` | Show help: after a command, only that command's |
 
 `stratus credential set` takes the value on **stdin and never in a flag** —
 a secret in argv is a secret in your shell history and in every `ps` on the
@@ -190,9 +195,7 @@ begins or ends with a space is stored as it is rather than quietly altered.
 terminal it asks for the token without echoing it, otherwise it reads it
 from stdin, and nothing prints it back. It refuses an Anthropic API key
 (`sk-ant-api…`), which would be refused on every turn as a subscription
-token, an agent id that is not on the roster, and the built-in `stratus`
-agent, which has no soul file and always runs on the shared sign-in (a
-configured default soul that takes the `stratus` id over is accepted).
+token, and an agent id that is not on the roster.
 The roster it checks is the one the default config names; for a daemon
 started with `--config <file>`, pass the same `--config <file>` to
 `signin set`.

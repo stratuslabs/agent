@@ -173,9 +173,7 @@ const trustedConfigPath = (env: CliEnvironment, configPath: string | undefined):
 
 /** Roster agents, then any agent the two blocks already name. `configPath` is `--config`, as the daemon was given it. */
 const knownAgentIds = async (env: CliEnvironment, configPath: string | undefined, config: Raw, warn: (line: string) => void): Promise<string[]> => {
-  // With the built-in agent, which every daemon serves whether or not a
-  // soul file or config entry names it.
-  const { entries } = await rosterSoulsWithConfigured(env, warn, { includeBuiltIn: true, ...(configPath !== undefined ? { configPath } : {}) });
+  const { entries } = await rosterSoulsWithConfigured(env, warn, configPath !== undefined ? { configPath } : {});
   const ids = entries.map((entry) => entry.soul.agent.id);
   for (const blockName of ['principals', 'approvals'] as const) {
     const block = config[blockName];

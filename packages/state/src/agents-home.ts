@@ -22,8 +22,8 @@ import { isValidAgentId } from '@stratusagent/agents';
 import { assertDerivedStatePath } from '@stratusagent/permissions';
 
 import { type StateEnvironment, readHomeDirectory, readNonEmptyString, readProcessEnv } from './environment.ts';
-import { agentStateDirPath, agentWorkspacePath, agentsDirPath, foldedAgentId, stratusHomePath } from './paths.ts';
-import { DEFAULT_STRATUS_AGENT, loadSoulFile } from './souls.ts';
+import { agentStateDirPath, agentWorkspacePath, agentsDirPath, stratusHomePath } from './paths.ts';
+import { loadSoulFile } from './souls.ts';
 import { remapLedger } from './migrations/workspaces.ts';
 import { syncDirectory, writeFileSynced } from './durable-write.ts';
 
@@ -493,9 +493,7 @@ export const writeNewSoulFile = async (
   const hidden = path.join(agentsDirPath(env), file);
   await assertDerivedStatePath(stratusHomePath(env), agentsDirPath(env), 'directory');
   await mkdir(agentsDirPath(env), { recursive: true });
-  const agentsHome = isValidAgentId(agentId) && foldedAgentId(agentId) !== DEFAULT_STRATUS_AGENT.id
-    ? claimAgentsHome(env)
-    : undefined;
+  const agentsHome = isValidAgentId(agentId) ? claimAgentsHome(env) : undefined;
   if (agentsHome === undefined) {
     await writeFileSynced(hidden, contents, { flag: 'wx' });
     await syncDirectory(path.dirname(hidden));
@@ -708,7 +706,7 @@ const surfaceSoul = async (env: StateEnvironment, agentsHome: string, file: stri
     // An unreadable soul is the roster's to report, and it does.
     return;
   }
-  if (!isValidAgentId(agentId) || foldedAgentId(agentId) === DEFAULT_STRATUS_AGENT.id) {
+  if (!isValidAgentId(agentId)) {
     return;
   }
   const visible = visibleSoulPathIn(agentsHome, agentId);
@@ -1128,7 +1126,7 @@ const soulToMove = async (filePath: string): Promise<string | undefined> => {
   } catch {
     return undefined;
   }
-  return isValidAgentId(agentId) && foldedAgentId(agentId) !== DEFAULT_STRATUS_AGENT.id ? agentId : undefined;
+  return isValidAgentId(agentId) ? agentId : undefined;
 };
 
 /**

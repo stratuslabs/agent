@@ -104,22 +104,20 @@ test('stratus signin set refuses what would never work, and stores nothing', asy
   assert.equal(await readFile(file, 'utf8'), before);
 });
 
-test('stratus signin set refuses the built-in agent, whose turns never read a sign-in of their own', async () => {
+test('stratus signin set refuses stratus on a home with no such soul: no agent lives in code', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
   const file = path.join(home, '.stratus', 'credentials.json');
   const before = await readFile(file, 'utf8');
 
-  // The built-in agent has no soul file, and the runtime reads an agent's
-  // own sign-in only for a run with a soul, so this would be stored and
-  // never used, after a CLI that said it worked.
-  const builtIn = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
-  assert.equal(builtIn.code, 1, builtIn.stdout);
-  assert.match(builtIn.stderr, /stratus is the built-in agent/);
-  assert.match(builtIn.stderr, /shared sign-in from `stratus setup`/);
-  assert.doesNotMatch(builtIn.stderr, /on the roster/);
+  // Once there was a built-in stratus with no soul file, which never read a
+  // sign-in of its own. Now there is no such agent unless a soul says so,
+  // so it is refused like any other id that is not on the roster.
+  const missing = await run(['signin', 'set', 'anthropic', '--agent', 'stratus'], { ...env, stdin: TOKEN });
+  assert.equal(missing.code, 1, missing.stdout);
+  assert.match(missing.stderr, /No agent stratus is on the roster/);
   assert.equal(await readFile(file, 'utf8'), before, 'nothing stored');
-  assert.ok(!builtIn.stdout.includes(TOKEN) && !builtIn.stderr.includes(TOKEN));
+  assert.ok(!missing.stdout.includes(TOKEN) && !missing.stderr.includes(TOKEN));
 });
 
 test('stratus signin set accepts the built-in id once a configured default soul takes it over', async () => {
@@ -142,22 +140,23 @@ test('stratus signin set accepts the built-in id once a configured default soul 
   assert.equal(stored.agentSignIns?.stratus?.anthropic?.value, TOKEN);
 });
 
-test('stratus signin set refuses a configured soul whose id folds onto the built-in, which the daemon ignores', async () => {
+test('stratus signin set refuses a configured soul whose id folds onto a roster agent, which the daemon ignores', async () => {
   const home = await newHome();
   const env = { homeDir: home, cwd: home, processEnv: {} };
   const file = path.join(home, '.stratus', 'credentials.json');
   const before = await readFile(file, 'utf8');
-  // `Stratus` names the built-in agent's state directory without being its
-  // id. The daemon drops that soul and routes to the built-in, so a token
-  // stored for `Stratus` would never be used.
+  // `Ava` names roster `ava`'s state directory without being its id. The
+  // daemon drops that soul, so a token stored for `Ava` would never be used.
+  await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
+  await writeFile(path.join(home, '.stratus', 'agents', 'ava.md'), '---\nname: Ava\nid: ava\nprovider: anthropic\n---\n\nYou are Ava.\n');
   const soul = path.join(home, 'main.md');
-  await writeFile(soul, '---\nname: Main\nid: Stratus\nprovider: anthropic\n---\n\nYou are Main.\n');
+  await writeFile(soul, '---\nname: Main\nid: Ava\nprovider: anthropic\n---\n\nYou are Main.\n');
   await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({ provider: 'anthropic', soul }));
 
-  const folded = await run(['signin', 'set', 'anthropic', '--agent', 'Stratus'], { ...env, stdin: TOKEN });
+  const folded = await run(['signin', 'set', 'anthropic', '--agent', 'Ava'], { ...env, stdin: TOKEN });
   assert.equal(folded.code, 1, folded.stdout);
-  assert.match(folded.stderr, /No agent Stratus is on the roster/);
-  assert.match(folded.stderr, /declares the agent id Stratus, which names the same state directory as stratus/);
+  assert.match(folded.stderr, /No agent Ava is on the roster/);
+  assert.match(folded.stderr, /declares the agent id Ava, which names the same state directory as ava/);
   assert.equal(await readFile(file, 'utf8'), before, 'nothing stored');
   assert.ok(!folded.stdout.includes(TOKEN) && !folded.stderr.includes(TOKEN));
 });

@@ -5,7 +5,6 @@ import {
   AGENTS_FOLDER_RECORD,
   planAgentsHome,
   defaultApiKeyEnvName,
-  DEFAULT_STRATUS_AGENT,
   globalConfigPath,
   loadChannelCredentials,
   loadCredentials,
@@ -19,6 +18,7 @@ import {
   readWorkingDirectory,
   DEFAULT_CONFIG_FILENAME,
   ignoredConfigKeys,
+  ConfigFileError,
   loadConfigFile,
   resolveAgentPrincipals,
   gatewayInfoPath,
@@ -44,7 +44,7 @@ import {
   withoutTrailingSlashes,
 } from '@stratusagent/state';
 import { homebrewNodeLink, readServiceCommand, readServiceStatus, recentServiceOutput, type ServiceEnvironment } from '../service.ts';
-import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor } from '../daemon.ts';
+import { callRunningGateway, EXPOSED_API_WARNING_PREFIX, gatewayErrorMessage, serviceEnvFor, unpublishedDaemon } from '../daemon.ts';
 import { configDigest } from '../config-digest.ts';
 import type { CliStreams, CliEnvironment } from '../environment.ts';
 import { writeLine, pathExists } from '../io.ts';
@@ -179,6 +179,8 @@ export interface DoctorReport {
   configInUse?: string;
   /** Config files that exist but lost to `configInUse`, nearest first. */
   configShadowed: string[];
+  /** The project config discovery passed over because it can't be read or parsed. */
+  configSkipped?: string;
   provider: DoctorSetting;
   model?: DoctorSetting;
   soul?: DoctorSetting;
@@ -216,9 +218,45 @@ export interface DoctorReport {
  * problems found" while the daemon ran with no plugins and no soul.
  */
 export type DoctorDaemon =
-  | { state: 'no-api' }
+  /**
+   * No control API published and nothing holds the home. `lockUnreadable`
+   * when this process may not read the home lock (a sandboxed shell), so
+   * a daemon may be there after all.
+   */
+  | { state: 'no-api'; lockUnreadable?: true }
+  /**
+   * Holding the home with no control API published: the package is not
+   * installed (`packageMissing`), or the daemon is starting, restarting, or
+   * runs with the API off.
+   */
+  | { state: 'without-api'; packageMissing: boolean }
+  /** `stratus update` holds the home to migrate it; the daemon is stopped until it finishes. */
+  | { state: 'updating' }
   | { state: 'unreachable'; url: string }
-  | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string; exposedOn?: string };
+  | {
+    state: 'running';
+    url: string;
+    version?: string;
+    startedAt?: string;
+    configPath?: string;
+    exposedOn?: string;
+    /**
+     * Each agent the daemon serves, with the provider and model it reports
+     * for it. Under serve a soul's provider pin outranks the daemon's
+     * environment, so this can differ from what a `stratus run` here would
+     * use. Absent for a daemon that does not list its agents.
+     */
+    agents?: DaemonAgent[];
+  };
+
+/** One agent a running daemon serves; `provider` is absent when it did not say. */
+export interface DaemonAgent {
+  id: string;
+  name: string;
+  default: boolean;
+  provider?: string;
+  model?: string;
+}
 
 /** Long enough for a busy daemon on loopback, short enough that doctor never hangs on a wedged one. */
 const DAEMON_TIMEOUT_MS = 3_000;
@@ -229,6 +267,7 @@ interface DaemonHealth {
   startedAt?: string;
   startup?: { warnings?: unknown; configs?: unknown };
   intake?: { paused?: unknown; unreadable?: unknown };
+  agents?: unknown;
 }
 
 const VALUE_TYPE_PHRASE = {
@@ -283,6 +322,32 @@ const ignoredConfigKeyProblems = async (configPath: string): Promise<string[]> =
  * a restart would only read the same broken one and pause again.
  */
 const INTAKE_WARNING_PREFIX = 'intake: ';
+/**
+ * How the gateway's start-up line for an empty roster begins. Judged by what
+ * the daemon serves now (`agents` in /health), not by the files: making an
+ * agent does not reload a running daemon, so a soul on disk can still leave
+ * it serving nobody. Once it serves one the line is history.
+ */
+const NO_AGENTS_WARNING_PREFIX = 'no agents yet: ';
+
+/** The agents a daemon's /health lists, keeping only well-formed entries; undefined when it lists none at all. */
+const servedAgents = (raw: unknown): DaemonAgent[] | undefined =>
+  Array.isArray(raw)
+    ? raw.flatMap((entry) => {
+        const { id, name, default: isDefault, runsOn } = (entry ?? {}) as { id?: unknown; name?: unknown; default?: unknown; runsOn?: unknown };
+        if (typeof id !== 'string') {
+          return [];
+        }
+        const { provider, model } = (runsOn ?? {}) as { provider?: unknown; model?: unknown };
+        return [{
+          id,
+          name: typeof name === 'string' ? name : id,
+          default: isDefault === true,
+          ...(typeof provider === 'string' ? { provider } : {}),
+          ...(typeof provider === 'string' && typeof model === 'string' ? { model } : {}),
+        }];
+      })
+    : undefined;
 
 /** What a daemon's /health said about each config file at start, keeping only well-formed entries. */
 const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | null }> =>
@@ -293,7 +358,7 @@ const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | nu
       })
     : [];
 
-const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<DoctorDaemon> => {
+const inspectDaemon = async (env: CliEnvironment, problems: string[], agentsOnDisk: boolean): Promise<DoctorDaemon> => {
   // Read here rather than through readGatewayInfo, which folds a damaged
   // file into "none": only a missing file is the benign case.
   const infoPath = gatewayInfoPath(env);
@@ -303,8 +368,14 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       // Information, not a problem: `stratus run` needs no daemon, and a
-      // daemon started with its control API off publishes no file either.
-      return { state: 'no-api' };
+      // daemon with no control API publishes no file either. The home lock
+      // tells those apart, since a daemon holds it from start to exit.
+      const unpublished = unpublishedDaemon(env);
+      return unpublished.state === 'without-api'
+        ? { state: 'without-api', packageMissing: unpublished.packageMissing }
+        : unpublished.state === 'updating'
+          ? { state: 'updating' }
+          : unpublished.state === 'unknown' ? { state: 'no-api', lockUnreadable: true } : { state: 'no-api' };
     }
     problems.push(`${infoPath} cannot be read (${(error as Error).message}), so doctor cannot find the running daemon. Check its permissions, or remove it and \`stratus restart\`.`);
     return { state: 'no-api' };
@@ -361,6 +432,19 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     if (line.startsWith(EXPOSED_API_WARNING_PREFIX)) {
       continue;
     }
+    if (line.startsWith(NO_AGENTS_WARNING_PREFIX)) {
+      // This build always reports the agents it serves; a daemon that
+      // printed this line is this build.
+      const served = Array.isArray(health.agents) ? health.agents.length : 0;
+      if (served === 0) {
+        problems.push(agentsOnDisk
+          ? 'The running daemon started with no agents and has not loaded any since. '
+            + 'Run `stratus restart` so it serves the ones you made.'
+          : 'No agents yet, so the running daemon fails every turn it is handed. '
+            + 'Create one with `stratus setup` or `stratus agent new`.');
+      }
+      continue;
+    }
     if (line.startsWith(INTAKE_WARNING_PREFIX)) {
       if (!startupPauseOver) {
         problems.push(
@@ -410,6 +494,7 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
   // an IPv6 address; `listen` is given it bare).
   const bound = URL.parse(url)?.hostname;
   const exposedOn = bound !== undefined && !(await bindsLoopback(bound.replace(/^\[(.*)\]$/, '$1'))) ? bound : undefined;
+  const agents = servedAgents(health.agents);
   return {
     state: 'running',
     url,
@@ -417,6 +502,7 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[]): Promise<D
     ...(typeof health.version === 'string' ? { version: health.version } : {}),
     ...(typeof health.startedAt === 'string' ? { startedAt: health.startedAt } : {}),
     ...(configPath !== undefined ? { configPath } : {}),
+    ...(agents !== undefined ? { agents } : {}),
   };
 };
 
@@ -507,7 +593,22 @@ export const collectDoctorReport = async (
       ];
   const present: Array<{ path: string; label: string }> = [];
   let unreadable: { path: string; label: string } | undefined;
+  // A project file that won't load, which discovery passes over for the
+  // next candidate (`discoverConfigLocation`): it is not the config in use.
+  let skippedProject: { path: string; reason: string } | undefined;
   for (const candidate of candidates) {
+    if (candidate.label === 'project') {
+      try {
+        await loadConfigFile(candidate.path);
+        present.push(candidate);
+      } catch (error) {
+        if ((error as ConfigFileError).code !== 'ENOENT') {
+          const cause = error instanceof ConfigFileError ? error.cause : error;
+          skippedProject = { path: candidate.path, reason: cause instanceof Error ? cause.message : String(cause) };
+        }
+      }
+      continue;
+    }
     try {
       await readFile(candidate.path, 'utf8');
       present.push(candidate);
@@ -535,6 +636,12 @@ export const collectDoctorReport = async (
   }
   const winner = unreadable ?? present[0];
   const shadowed = unreadable ? [] : present.slice(1);
+  if (skippedProject !== undefined) {
+    problems.push(
+      `${skippedProject.path} can't be used (${skippedProject.reason}), so runs started in this directory skip it`
+      + `${unreadable ? '' : ` and use ${winner?.path ?? 'the built-in defaults'}`}. Fix it or remove it.`,
+    );
+  }
   if (winner && shadowed.length > 0 && winner.label.startsWith('project')) {
     problems.push(
       `${winner.path} outranks ${shadowed.map((entry) => entry.path).join(' and ')} for runs started in this directory. `
@@ -703,8 +810,13 @@ export const collectDoctorReport = async (
     // Setup writes the config file, which is the LOWEST precedence of the
     // three — so when an env var or a soul chose demo, "run setup" is
     // advice that changes nothing and leaves every run on demo.
+    //
+    // The variable outranks a soul only for a run. The daemon serves every
+    // agent from one environment, so there it is the default for agents
+    // that pin nothing, and a pinned soul demotes it (`applySoulPins`).
     const fix = envProviderPick
-      ? `Unset ${envProviderPick.name}; it outranks both your config and any soul.`
+      ? `Unset ${envProviderPick.name}; it outranks your config file, and in \`stratus run\` any soul too. `
+        + 'Under `stratus serve` an agent whose soul pins a provider runs on its pin instead.'
       : soul?.provider === 'demo'
         ? `Change or remove the provider pin in ${soulPath}; a soul outranks the config file.`
         : fileConfig.provider === 'demo'
@@ -852,7 +964,6 @@ export const collectDoctorReport = async (
     problems.push(error instanceof Error ? error.message : String(error));
   }
   const rosterIds = new Set(rosterEntries.map((entry) => entry.soul.agent.id));
-  rosterIds.add(DEFAULT_STRATUS_AGENT.id);
   if (soul) {
     rosterIds.add(soul.agent.id);
   }
@@ -1022,7 +1133,9 @@ export const collectDoctorReport = async (
     );
   }
 
-  const daemon = await inspectDaemon(env, problems);
+  // A roster that would not load is already a problem above, and no
+  // evidence that there are no agents.
+  const daemon = await inspectDaemon(env, problems, rosterIds.size > 0 || !rosterLoaded);
   // With no daemon answering, a stopped service is the finding the rest
   // wait on, so it goes first. A doctor run on a host whose daemon was down
   // led with a stray-souls warning instead.
@@ -1037,6 +1150,7 @@ export const collectDoctorReport = async (
   return {
     ...(winner ? { configInUse: winner.path } : {}),
     configShadowed: shadowed.map((entry) => entry.path),
+    ...(skippedProject ? { configSkipped: skippedProject.path } : {}),
     provider,
     ...(model ? { model } : {}),
     ...(soulPath ? { soul: { value: soulPath, source: soulSource } } : {}),
@@ -1087,7 +1201,7 @@ export const runDoctor = async (
     // describe a run that cannot happen.
     writeLine(streams.stdout, `  ${'agent'.padEnd(10)}unresolved — the configured soul could not be read`);
   } else {
-    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}${DEFAULT_STRATUS_AGENT.name} (built-in — no soul configured)`);
+    writeLine(streams.stdout, `  ${'agent'.padEnd(10)}none — no default soul is set. \`stratus setup\` creates your first agent`);
   }
 
   writeLine(streams.stdout);
@@ -1095,6 +1209,9 @@ export const runDoctor = async (
   writeLine(streams.stdout, `  config    ${report.configInUse ?? 'none found — built-in defaults apply'}`);
   for (const shadowedPath of report.configShadowed) {
     writeLine(streams.stdout, `            (${shadowedPath} exists but is outranked)`);
+  }
+  if (report.configSkipped !== undefined) {
+    writeLine(streams.stdout, `            (${report.configSkipped} skipped: it can't be used)`);
   }
   writeLine(streams.stdout, `  agents    ${report.rosterCount} soul file${report.rosterCount === 1 ? '' : 's'}`);
   const folder = report.agentsFolder;
@@ -1155,9 +1272,19 @@ export const runDoctor = async (
   writeLine(streams.stdout, 'Daemon');
   const daemon = report.daemon;
   if (daemon.state === 'no-api') {
-    // No published control API: none running, or one started with the API
-    // off. Doctor cannot tell those apart from here, so it does not guess.
-    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}none found (no control API published)`);
+    // Nothing holds the home, or this process may not read the lock (a
+    // sandboxed shell), in which case it does not guess.
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}${daemon.lockUnreadable ? 'none found (no control API published)' : 'none running'}`);
+  } else if (daemon.state === 'without-api') {
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}running without a control API`);
+    if (daemon.packageMissing) {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}@stratusagent/control-api isn't installed, so health, sessions, tasks, restart and dashboard can't reach it.`);
+      writeLine(streams.stdout, `  ${''.padEnd(10)}To add it: npm install -g @stratusagent/control-api@${CLI_VERSION}, then restart stratusd.`);
+    } else {
+      writeLine(streams.stdout, `  ${''.padEnd(10)}It is still starting or restarting, or runs with --no-api or api.enabled: false.`);
+    }
+  } else if (daemon.state === 'updating') {
+    writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}stopped while \`stratus update\` migrates this home`);
   } else if (daemon.state === 'unreachable') {
     writeLine(streams.stdout, `  ${'daemon'.padEnd(10)}did not answer at ${daemon.url}`);
   } else {
@@ -1171,6 +1298,27 @@ export const runDoctor = async (
     }
     if (daemon.exposedOn !== undefined) {
       writeLine(streams.stdout, `  ${''.padEnd(10)}API on ${daemon.exposedOn}: other machines can reach it unless a firewall or port mapping stops them`);
+    }
+    if (daemon.agents !== undefined) {
+      // As the daemon resolves them, pins applied: the top section is what
+      // a `stratus run` from this shell would use, which can differ.
+      const describe = (agent: DaemonAgent): string => {
+        const who = `${agent.name} (${agent.id}${agent.default ? ', default' : ''})`;
+        if (agent.provider === undefined) {
+          return `${who}: the daemon did not say which provider`;
+        }
+        if (agent.provider === 'demo') {
+          return `${who} on demo (offline)`;
+        }
+        if (agent.provider === 'none') {
+          return `${who} with no provider: run \`stratus setup\``;
+        }
+        return `${who} on ${agent.provider}${agent.model !== undefined ? ` · ${agent.model}` : ''}`;
+      };
+      const lines = daemon.agents.length === 0 ? ['none'] : daemon.agents.map(describe);
+      lines.forEach((line, index) => {
+        writeLine(streams.stdout, `  ${(index === 0 ? 'agents' : '').padEnd(10)}${line}`);
+      });
     }
   }
 

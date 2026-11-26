@@ -151,10 +151,7 @@ export const collectPluginsReport = async (
   let roster: Awaited<ReturnType<typeof loadRosterSouls>> = [];
   let rosterUnreadable = false;
   try {
-    const resolved = await rosterSoulsWithConfigured(env, warn, {
-      ...(command.configPath !== undefined ? { configPath: command.configPath } : {}),
-      includeBuiltIn: true,
-    });
+    const resolved = await rosterSoulsWithConfigured(env, warn, command.configPath !== undefined ? { configPath: command.configPath } : {});
     roster = resolved.entries;
     rosterUnreadable = !resolved.complete;
   } catch (error) {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentRunner, ContextOverflowError, EventBus, HostRefusalError, InMemorySessionStore, type Session } from '@stratusagent/core';
-import { chmod, mkdir, mkdtemp, readdir, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -791,15 +791,99 @@ test('config file errors are typed and preserve the underlying fs code', async (
     (error: unknown) => error instanceof ConfigFileError,
   );
 
-  // Auto-discovery over a candidate that exists but cannot be read (here:
-  // a directory wearing the config filename) fails typed as well — the
-  // same degradation path as a parse failure.
+  // Auto-discovery over a global config that exists but cannot be read
+  // (here: a directory wearing the config filename) fails typed as well —
+  // the same degradation path as a parse failure.
+  await mkdir(path.join(home, '.stratus', 'config.json'), { recursive: true });
   const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-cfg-proj-'));
-  await mkdir(path.join(project, 'stratus.config.json'));
   await assert.rejects(
     () => resolveConfigLocation({}, { homeDir: home, cwd: project }),
     (error: unknown) => error instanceof ConfigFileError,
   );
+});
+
+test('the configured soul resolves from a preset config snapshot without reading a file', async () => {
+  const { resolveConfiguredSoul } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-preset-soul-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-preset-soul-proj-'));
+  const env = { homeDir: home, cwd: project, processEnv: {} };
+  const soulPath = path.join(home, 'bob.md');
+  await writeFile(soulPath, '---\nname: Bob\n---\n\nYou are Bob.\n');
+  // What discovery would find here is a file that won't load, and the
+  // global config names nobody: only the snapshot can answer.
+  await writeFile(path.join(project, 'stratus.config.json'), '{ broken');
+
+  const trusted = await resolveConfiguredSoul({ presetConfig: { config: { soul: soulPath }, trusted: true, path: '/snapshot.json' } }, env);
+  assert.equal(trusted?.soul.agent.id, 'bob');
+  assert.equal(trusted?.path, soulPath);
+  // The snapshot's trust flag is honored as discovery's would be.
+  assert.equal(await resolveConfiguredSoul({ presetConfig: { config: { soul: soulPath }, trusted: false, path: '/snapshot.json' } }, env), undefined);
+  assert.equal(await resolveConfiguredSoul({ presetConfig: { config: {}, trusted: true } }, env), undefined);
+});
+
+test('an auto-found project config that cannot be used is skipped for the trusted one; a named one still fails', async () => {
+  const { discoverConfigLocation, resolveConfigLocation, resolveRuntimeConfig, ConfigFileError } = await import('../src/index.ts');
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-skip-home-'));
+  const project = await mkdtemp(path.join(os.tmpdir(), 'stratus-skip-proj-'));
+  const env = { homeDir: home, cwd: project, processEnv: {} };
+  const globalPath = globalConfigPath(env);
+  const projectPath = path.join(project, 'stratus.config.json');
+  await mkdir(path.dirname(globalPath), { recursive: true });
+  await writeFile(globalPath, JSON.stringify({ provider: 'demo' }));
+
+  // Every way the file can fail to load: it doesn't parse, it isn't a
+  // config, it can't be read at all. Each is passed over for the global
+  // file, which is the config a run started here uses, and named.
+  const broken: Array<[string, () => Promise<void>, RegExp]> = [
+    ['bad JSON', () => writeFile(projectPath, '{ "provider": "demo",, }'), /JSON/],
+    ['not an object', () => writeFile(projectPath, '[]'), /JSON object/],
+    ['a directory', () => mkdir(projectPath), /EISDIR/],
+  ];
+  for (const [label, make, reason] of broken) {
+    await make();
+    const found = await discoverConfigLocation({}, env);
+    assert.deepEqual(found.location, { path: globalPath, trusted: true }, label);
+    assert.equal(found.skipped?.path, projectPath, label);
+    assert.match(found.skipped?.reason ?? '', reason, label);
+    assert.doesNotMatch(found.skipped?.reason ?? '', /Could not use config/, `${label}: the reason is the cause alone`);
+    assert.deepEqual(await resolveConfigLocation({}, env), { path: globalPath, trusted: true }, label);
+    assert.equal((await resolveRuntimeConfig({}, env)).provider, 'demo', label);
+    await rm(projectPath, { recursive: true, force: true });
+  }
+
+  // With no global file behind it, nothing is found, and the skip is still said.
+  await writeFile(projectPath, '{ broken');
+  await rm(globalPath);
+  const alone = await discoverConfigLocation({}, env);
+  assert.equal(alone.location, undefined);
+  assert.equal(alone.skipped?.path, projectPath);
+
+  // A file that loads is used, as before, and nothing is skipped.
+  await writeFile(projectPath, JSON.stringify({ provider: 'demo' }));
+  assert.deepEqual(await discoverConfigLocation({}, env), { location: { path: projectPath, trusted: false } });
+
+  // A file somebody named is not discovered, so it is not skipped: a run
+  // on it fails, through --config and STRATUS_CONFIG alike.
+  await writeFile(globalPath, JSON.stringify({ provider: 'demo' }));
+  await writeFile(projectPath, '{ broken');
+  const viaEnv = { ...env, processEnv: { STRATUS_CONFIG: './stratus.config.json' } };
+  for (const [label, selection, runEnv] of [
+    ['--config', { configPath: './stratus.config.json' }, env],
+    ['STRATUS_CONFIG', {}, viaEnv],
+  ] as const) {
+    assert.deepEqual(await discoverConfigLocation(selection, runEnv), { location: { path: projectPath, trusted: true } }, label);
+    await assert.rejects(
+      () => resolveRuntimeConfig(selection, runEnv),
+      (error: unknown) => error instanceof ConfigFileError && error.configPath === projectPath,
+      label,
+    );
+  }
+
+  // A broken global file is the operator's own, and still fails discovery
+  // behind a skipped project file.
+  await rm(globalPath);
+  await mkdir(globalPath);
+  await assert.rejects(() => discoverConfigLocation({}, env), (error: unknown) => error instanceof ConfigFileError && error.configPath === globalPath);
 });
 
 test('the fallback switch persists before the fallback attempt begins', async () => {
@@ -1106,19 +1190,18 @@ test('two ids that differ only by Unicode normalization are one directory too', 
   assert.match(failure.message, /b-second\.md/);
 });
 
-test('a soul claiming the built-in id in another case is ignored, not served', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-case-'));
+test('a soul declaring the id stratus is on the roster like any other', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-stratus-'));
   const dir = agentsDirPath({ homeDir: home });
   await mkdir(dir, { recursive: true });
-  await writeFile(path.join(dir, 'impostor.md'), '---\nname: Impostor\nid: Stratus\n---\n\nYou are not Stratus.\n');
+  await writeFile(path.join(dir, 'stratus.md'), '---\nname: Stratus\nid: stratus\n---\n\nYou are Stratus.\n');
 
   const warnings: string[] = [];
   const roster = await loadRosterSouls({ homeDir: home }, (message) => warnings.push(message));
 
-  // `agents/Stratus/` is the built-in agent's own state directory wherever
-  // case folds, so this is the reserved id, spelled differently.
-  assert.deepEqual(roster, []);
-  assert.match(warnings.join(' '), /reserved/);
+  // No agent lives in code any more, so no id is held back for one.
+  assert.deepEqual(roster.map((entry) => entry.soul.agent.id), ['stratus']);
+  assert.deepEqual(warnings, []);
 });
 
 test('an unreadable soul still degrades to a warning, unlike a duplicate', async () => {
@@ -1140,24 +1223,18 @@ test('an unreadable soul still degrades to a warning, unlike a duplicate', async
   assert.ok(warnings.some((line) => line.includes('Invalid agent id')), JSON.stringify(warnings));
 });
 
-test('two souls claiming the reserved id are skipped, not treated as a collision', async () => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-reserved-'));
+test('two souls claiming stratus collide like any other pair', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-roster-stratus-pair-'));
   const dir = agentsDirPath({ homeDir: home });
   await mkdir(dir, { recursive: true });
   await writeFile(path.join(dir, 'a.md'), '---\nname: One\nid: stratus\n---\n\nYou are one.\n');
-  await writeFile(path.join(dir, 'b.md'), '---\nname: Two\nid: stratus\n---\n\nYou are two.\n');
-  await writeFile(path.join(dir, 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(dir, 'b.md'), '---\nname: Two\nid: Stratus\n---\n\nYou are two.\n');
 
-  // Neither was going to get the id — it is reserved — so their agreeing
-  // on it is not an ambiguity worth refusing over. Left after the
-  // collision check, a repository could take a daemon down just by
-  // shipping two souls named `stratus`, turning a guard against hijacking
-  // the built-in into a way to deny service.
-  const warnings: string[] = [];
-  const entries = await loadRosterSouls({ homeDir: home }, (line) => warnings.push(line));
-
-  assert.deepEqual(entries.map((entry) => entry.soul.agent.id), ['ava']);
-  assert.equal(warnings.filter((line) => line.includes('reserved')).length, 2);
+  const failure = await loadRosterSouls({ homeDir: home }, () => {}).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  assert.ok(failure instanceof DuplicateAgentIdError, `expected a typed refusal, got ${String(failure)}`);
 });
 
 test('an injected query transport reaches a subscription fallback behind any primary', async () => {
@@ -2078,12 +2155,16 @@ test('a config that is simply not there leaves the id check with nothing to repo
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-declared-'));
   const configPath = path.join(home, '.stratus', 'config.json');
 
+  await mkdir(agentsDirPath({ homeDir: home }), { recursive: true });
+  await writeFile(path.join(agentsDirPath({ homeDir: home }), 'ava.md'), '---\nname: Ava\nid: ava\n---\n\nYou are Ava.\n');
   const absent = await declaredAgentIds({ homeDir: home, cwd: home, processEnv: {} }, configPath);
   assert.deepEqual(absent.unread, []);
-  assert.ok(absent.holds('stratus'));
+  assert.ok(absent.holds('ava'));
   // And by the rule the filesystem uses, not by the exact string: an id
   // is claimed against what would name the same directory.
-  assert.ok(absent.holds('Stratus'));
+  assert.ok(absent.holds('Ava'));
+  // No id is held back for an agent that lives in code: none does.
+  assert.equal(absent.holds('stratus'), false);
 
   // A config that exists and will not parse is the other case, and stays
   // reported: there the ids really are unchecked.

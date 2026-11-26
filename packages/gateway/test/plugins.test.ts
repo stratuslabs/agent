@@ -9,8 +9,9 @@ import { HostRefusalError, type Plugin, type ProviderCallCheck, type StratusEven
 import type { OptionalModuleHost } from '@stratusagent/plugins';
 
 import { createGateway } from '../src/index.ts';
+import { withDefaultAgent } from './default-agent.ts';
 
-const newHome = async (): Promise<string> => mkdtemp(path.join(os.tmpdir(), 'stratus-gw-plugins-'));
+const newHome = async (): Promise<string> => withDefaultAgent(await mkdtemp(path.join(os.tmpdir(), 'stratus-gw-plugins-')));
 
 /**
  * A package that exists as far as the loader needs: a package.json on disk

@@ -30,12 +30,13 @@ import {
 import type { StateEnvironment } from './environment.ts';
 import { createShardedFileMemoryStore } from './memory.ts';
 import { agentMemoryFilePath, stratusHomePath } from './paths.ts';
-import { DEFAULT_STRATUS_AGENT } from './souls.ts';
+import { LEGACY_DEFAULT_AGENT_ID } from './souls.ts';
 
 // Unsouled runs used to remember facts under a per-provider default agent.
-// Stratus inherits all of them: reads for the built-in agent also return
-// entries stored under the legacy ids, while new facts land under 'stratus'.
-const LEGACY_DEFAULT_AGENT_IDS = ['demo-agent', 'anthropic-agent', 'openai-agent'];
+// The agent with the id 'stratus' (once built in, now a soul an upgrade
+// writes) inherits all of them: reads for it also return entries stored
+// under the legacy ids, while new facts land under 'stratus'.
+export const LEGACY_DEFAULT_AGENT_IDS: readonly string[] = ['demo-agent', 'anthropic-agent', 'openai-agent'];
 
 /**
  * One entry per id across the merged aliases, the earlier alias winning —
@@ -191,8 +192,8 @@ const unboundedList = (options?: MemoryListOptions): MemoryListOptions | undefin
 // legacy id crowds out the others.
 export const withLegacyDefaultMemories = (store: AgentMemoryStore): AgentMemoryStore => {
   const aliasIds = (agentId: string): string[] =>
-    agentId === DEFAULT_STRATUS_AGENT.id
-      ? [DEFAULT_STRATUS_AGENT.id, ...LEGACY_DEFAULT_AGENT_IDS]
+    agentId === LEGACY_DEFAULT_AGENT_ID
+      ? [LEGACY_DEFAULT_AGENT_ID, ...LEGACY_DEFAULT_AGENT_IDS]
       : [agentId];
   /**
    * One budget for the merged identity, not one per alias. Each alias

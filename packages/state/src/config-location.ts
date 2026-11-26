@@ -17,41 +17,85 @@ export interface ResolvedConfigLocation {
   trusted: boolean;
 }
 
-export const resolveConfigLocation = async (
+/**
+ * An auto-discovered project config that discovery passed over because it
+ * cannot be read, parsed, or validated. Only a discovered file is ever
+ * skipped: one somebody named with --config or STRATUS_CONFIG is what they
+ * asked for, so a run on it fails instead.
+ */
+export interface SkippedConfigFile {
+  path: string;
+  /** What went wrong, as the loader said it, without the path. */
+  reason: string;
+}
+
+export interface ConfigDiscovery {
+  location?: ResolvedConfigLocation;
+  skipped?: SkippedConfigFile;
+}
+
+/**
+ * Which config a run started here uses, and the project file it passed
+ * over, if any.
+ *
+ * A project-local `stratus.config.json` is untrusted, so it can't be a
+ * reason the operator's own config stops working: one that won't load is
+ * skipped, and discovery goes on to the global file, the same answer the
+ * trusted readers (`readTrustedConfigBlock`, `trustedConfigError`) give. A
+ * global file that exists and can't be read still throws: it is the
+ * operator's, and running on built-in defaults instead would describe a
+ * configuration they never chose. Callers that talk to someone say the
+ * skip; the rest get `resolveConfigLocation`.
+ */
+export const discoverConfigLocation = async (
   selection: Pick<RuntimeSelection, 'configPath'>,
   env: StateEnvironment,
-): Promise<ResolvedConfigLocation | undefined> => {
+): Promise<ConfigDiscovery> => {
   const processEnv = readProcessEnv(env);
   const cwd = readWorkingDirectory(env);
   const explicit = selection.configPath ?? processEnv.STRATUS_CONFIG;
 
   if (explicit) {
-    return { path: path.resolve(cwd, explicit), trusted: true };
+    return { location: { path: path.resolve(cwd, explicit), trusted: true } };
   }
 
   // Project-local configs win; the global ~/.stratus/config.json written by
   // `stratus setup` is the fallback that makes the CLI work from anywhere.
-  const candidates: ResolvedConfigLocation[] = [
-    { path: path.join(cwd, DEFAULT_CONFIG_FILENAME), trusted: false },
-    { path: globalConfigPath(env), trusted: true },
-  ];
-  for (const candidate of candidates) {
-    try {
-      await readFile(candidate.path, 'utf8');
-      return candidate;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        // A config that exists but cannot be read is the same class of
-        // failure as one that cannot be parsed — typed, so long-running
-        // callers can degrade instead of failing every dispatch.
-        throw new ConfigFileError(candidate.path, error);
-      }
+  // The project file is loaded in full, not only read, because a file that
+  // reads but won't parse fails every run just the same.
+  let skipped: SkippedConfigFile | undefined;
+  const projectPath = path.join(cwd, DEFAULT_CONFIG_FILENAME);
+  try {
+    await loadConfigFile(projectPath);
+    return { location: { path: projectPath, trusted: false } };
+  } catch (error) {
+    if ((error as ConfigFileError).code !== 'ENOENT') {
+      const cause = error instanceof ConfigFileError ? error.cause : error;
+      skipped = { path: projectPath, reason: cause instanceof Error ? cause.message : String(cause) };
     }
   }
 
-  return undefined;
+  const globalPath = globalConfigPath(env);
+  try {
+    await readFile(globalPath, 'utf8');
+    return { location: { path: globalPath, trusted: true }, ...(skipped ? { skipped } : {}) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // A config that exists but cannot be read is the same class of
+      // failure as one that cannot be parsed — typed, so long-running
+      // callers can degrade instead of failing every dispatch.
+      throw new ConfigFileError(globalPath, error);
+    }
+  }
+
+  return skipped ? { skipped } : {};
 };
+
+/** {@link discoverConfigLocation}'s answer, for callers with nobody to tell about a skipped file. */
+export const resolveConfigLocation = async (
+  selection: Pick<RuntimeSelection, 'configPath'>,
+  env: StateEnvironment,
+): Promise<ResolvedConfigLocation | undefined> => (await discoverConfigLocation(selection, env)).location;
 
 // Tolerant config discovery for callers that only need the config as a
 // hint (listing, agent creation): a config that exists but cannot be read
@@ -67,12 +111,16 @@ export const discoverActiveConfig = async (
    */
   configPath?: string,
 ): Promise<{ location?: ResolvedConfigLocation; config: StratusConfigFile }> => {
-  let location: ResolvedConfigLocation | undefined;
+  let discovery: ConfigDiscovery;
   try {
-    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
+    discovery = await discoverConfigLocation(configPath ? { configPath } : {}, env);
   } catch (error) {
     warn(`ignoring unreadable config (${error instanceof Error ? error.message : String(error)})`);
     return { config: {} };
+  }
+  const { location, skipped } = discovery;
+  if (skipped) {
+    warn(`ignoring unreadable config ${skipped.path} (${skipped.reason})`);
   }
   if (!location) {
     return { config: {} };
@@ -99,32 +147,6 @@ export type TrustedConfigBlock<T> =
   | { status: 'unreadable'; error: unknown };
 
 /**
- * Discovery as the trusted readers need it.
- *
- * `resolveConfigLocation` throws when a candidate exists and cannot be read,
- * which is right for a run. For a trusted block it is not: an unreadable
- * project-local `stratus.config.json` (a directory, a file with no read
- * permission) is an untrusted file that could not have set a trusted block
- * anyway, and failing on it let a checkout stop the daemon, or empty every
- * trusted block, by what it ships. Discovery reads candidates only, never an
- * explicitly named path, so a throw names the project candidate or the
- * global file, and only the second is a trusted failure.
- */
-const trustedReadLocation = async (
-  env: StateEnvironment,
-  configPath: string | undefined,
-): Promise<ResolvedConfigLocation | undefined> => {
-  try {
-    return await resolveConfigLocation(configPath ? { configPath } : {}, env);
-  } catch (error) {
-    if (error instanceof ConfigFileError && error.configPath !== globalConfigPath(env)) {
-      return { path: error.configPath, trusted: false };
-    }
-    throw error;
-  }
-};
-
-/**
  * Read one block of the daemon's own config, honouring the trust boundary.
  *
  * `api`, `approvals`, and `plugins` are all read this way: which interface
@@ -147,7 +169,7 @@ export const readTrustedConfigBlock = async <K extends keyof StratusConfigFile>(
 ): Promise<TrustedConfigBlock<NonNullable<StratusConfigFile[K]>>> => {
   let location: ResolvedConfigLocation | undefined;
   try {
-    location = await trustedReadLocation(env, configPath);
+    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
     if (!location) {
       return { status: 'absent' };
     }
@@ -213,7 +235,7 @@ export const readGlobalConfigBlock = async <K extends keyof StratusConfigFile>(
  * file that fails to parse is not a reason, by the same rule the block
  * reader follows — it could not have set a trusted block whatever it said,
  * and a malformed file in a clone must not keep the operator's daemon down.
- * Nor is one that cannot be read at all; see `trustedReadLocation`.
+ * Nor is one that cannot be read at all: discovery skips both kinds.
  *
  * Exists for `stratus serve`'s start (#214). Each block degrades on its own
  * when the file will not load — no plugins, the built-in soul, no
@@ -230,7 +252,7 @@ export const trustedConfigError = async (
     error instanceof ConfigFileError ? error : new ConfigFileError(filePath, error);
   let location: ResolvedConfigLocation | undefined;
   try {
-    location = await trustedReadLocation(env, configPath);
+    location = await resolveConfigLocation(configPath ? { configPath } : {}, env);
   } catch (error) {
     return asConfigError(configPath ?? globalConfigPath(env), error);
   }

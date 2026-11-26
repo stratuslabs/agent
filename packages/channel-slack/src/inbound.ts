@@ -548,11 +548,20 @@ export const createInbound = ({
         renderer.stoppedBy = stopped.by;
         renderer.controller.abort(new RunAbortedError(`${SLACK_STOP_REASON}${stopped.by}`));
       }
-      // In a DM each message is its own status key, and Slack stops showing
-      // the running turn's once a newer message sits below it — so a
-      // message queued there that stayed dark read as the agent having
-      // stopped until the reply ahead of it posted. In a channel thread the
-      // key is shared, and the running turn's status stays up instead.
+      // In a DM each message is its own status key. A status under each
+      // message sent while the agent works stacks one "Thinking…" per
+      // message, so the turns ahead of this one move theirs to it: the
+      // newest message carries the session's one status, which says what
+      // the running turn is doing, and this one shows its own once it
+      // reaches the head. In a channel thread the key is already shared,
+      // and nothing moves.
+      if (renderer.statusThread !== undefined) {
+        for (const ahead of queue) {
+          if (ahead !== renderer) {
+            ahead.moveStatus(renderer.statusThread);
+          }
+        }
+      }
       renderer.showLoading(queue.length === 1 || queue[0]?.statusThread !== renderer.statusThread);
       let repeat: 'live' | 'finished' | undefined;
       let absorbed = false;
