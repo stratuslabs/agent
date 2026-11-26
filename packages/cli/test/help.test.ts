@@ -1,11 +1,12 @@
 import './home-guard.ts';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-import { HELP_TEXT, runCli } from '../src/index.ts';
+import { HELP_TEXT, parseCommand, runCli } from '../src/index.ts';
 
 // A usage error prints the error and one line pointing at the help for the
 // command that was typed, and `stratus <command> --help` prints only that
@@ -157,6 +158,12 @@ test('a usage error prints the error and one line pointing at that command\'s he
     // Only `schedule list` and `schedule cancel` run, but `schedule --help` does too.
     [['schedule', 'bogus'], 'Unknown command: schedule', 'stratus schedule --help'],
     [['plugin', 'bogus'], 'Unknown command: plugin', 'stratus plugin --help'],
+    // Options a command used to take and then ignore, where the help
+    // never offered them: refused, so nobody thinks they filtered.
+    [['memory', 'search', 'ava', 'deploy', '--trust', 'user'], 'Unknown option: --trust', 'stratus memory search --help'],
+    [['memory', 'audit', 'ava', '--trust', 'user'], 'Unknown option: --trust', 'stratus memory audit --help'],
+    [['memory', 'export', 'ava', '--format', 'json'], 'Unknown option: --format', 'stratus memory export --help'],
+    [['credentials', '--agent', 'ava'], 'Unknown option: --agent', 'stratus credentials --help'],
   ] as const) {
     const result = await run([...argv]);
     assert.equal(result.exitCode, 1, argv.join(' '));
@@ -178,4 +185,131 @@ test('an unknown command, or help for one, points at the whole list', async () =
     assert.equal(result.stdout, '');
     assert.equal(result.stderr, `Error: ${error}\nRun \`stratus --help\` for the list of commands.\n`, argv.join(' '));
   }
+});
+
+/*
+ * Each command in the help, by its entry's name, and the forms of it a
+ * flag is tried on: every action the entry covers, since an action can
+ * take a flag of its own (`grants revoke --destination`), each with the
+ * words it needs to parse, or to parse once one more option is added.
+ */
+const COMMAND_FORMS: Readonly<Record<string, readonly (readonly string[])[]>> = {
+  setup: [['setup']],
+  chat: [['chat']],
+  run: [['run', 'hello']],
+  serve: [['serve']],
+  service: [['service', 'install'], ['service', 'status']],
+  logs: [['logs']],
+  'template add': [['template', 'add', './template']],
+  'skill add': [['skill', 'add', './skill']],
+  'skill validate': [['skill', 'validate', './skill']],
+  skills: [['skills'], ['skill', 'list']],
+  plugins: [['plugins'], ['plugin', 'list']],
+  'skill reload': [['skill', 'reload']],
+  restart: [['restart']],
+  health: [['health']],
+  events: [['events']],
+  sessions: [['sessions'], ['session', 'list']],
+  tasks: [['tasks'], ['tasks', 'cancel', 'task-1']],
+  'credential set': [['credential', 'set', 'search.apiKey'], ['credential', 'set', 'search.apiKey', '--agent', 'ava']],
+  'credential env': [['credential', 'env', 'search.apiKey', 'SEARCH_API_KEY', '--agent', 'ava']],
+  credentials: [['credentials'], ['credential', 'list']],
+  'credential remove': [['credential', 'remove', 'search.apiKey']],
+  'signin set': [['signin', 'set', 'anthropic', '--agent', 'ava']],
+  'signin list': [['signin', 'list'], ['signins']],
+  'signin remove': [['signin', 'remove', 'anthropic', '--agent', 'ava']],
+  'channel set': [['channel', 'set', 'slack', '--agent', 'ava']],
+  'channel list': [['channel', 'list'], ['channels']],
+  'channel remove': [['channel', 'remove', 'slack', '--agent', 'ava']],
+  schedules: [['schedules'], ['schedule', 'list'], ['schedules', 'cancel', 'schedule-1'], ['schedule', 'cancel', 'schedule-1']],
+  grants: [['grants', 'ava'], ['grants', 'revoke', 'ava'], ['grants', 'revoke', 'ava', '--tool', 'web.fetch']],
+  people: [['people'], ['people', 'add', 'U0123ABCD'], ['people', 'remove', 'U0123ABCD']],
+  'memory list': [['memory', 'list', 'ava']],
+  'memory search': [['memory', 'search', 'ava', 'deploy']],
+  'memory forget': [['memory', 'forget', 'ava', 'ava:memory:1']],
+  'memory audit': [['memory', 'audit', 'ava']],
+  'memory pin': [['memory', 'pin', 'ava', 'ava:memory:1'], ['memory', 'unpin', 'ava', 'ava:memory:1']],
+  'memory export': [['memory', 'export', 'ava']],
+  'memory import': [['memory', 'import', 'ava', '--file', 'ava.jsonl']],
+  'memory reassert': [['memory', 'reassert', 'ava', '--trust', 'user', 'ava:memory:1']],
+  'memory passes': [['memory', 'passes', 'ava']],
+  'memory undo-pass': [['memory', 'undo-pass', 'ava', 'pass-1']],
+  'session rollover': [['session', 'rollover', 'slack:ava:T1:D1']],
+  'agent new': [['agent', 'new']],
+  agents: [['agents'], ['agent', 'list']],
+  doctor: [['doctor']],
+  update: [['update']],
+  dashboard: [['dashboard']],
+  version: [['version']],
+};
+
+/** Every flag spelled out in the parsers, accepted by some command or not. */
+const parserFlags = async (): Promise<string[]> => {
+  const directory = fileURLToPath(new URL('../src/parse/', import.meta.url));
+  const files = [
+    ...(await readdir(directory)).filter((name) => name.endsWith('.ts')).map((name) => path.join(directory, name)),
+    fileURLToPath(new URL('../src/parse.ts', import.meta.url)),
+  ];
+  const flags = new Set<string>();
+  for (const file of files) {
+    for (const [, flag = ''] of (await readFile(file, 'utf8')).matchAll(/'(-{1,2}[A-Za-z][\w-]*)'/g)) {
+      flags.add(flag);
+    }
+  }
+  return [...flags].sort();
+};
+
+/** A value for each kind of option that takes one, so a form can be tried with it. */
+const VALUES = ['json', 'user', '1', 'never', 'headless', 'failed', 'demo', 'SEARCH_API_KEY'];
+
+/** What a form parses to with these words added, the first left out, or undefined when it does not parse. */
+const parsed = (form: readonly string[], words: readonly string[]): string | undefined => {
+  try {
+    const [word = ''] = words;
+    return JSON.stringify(parseCommand([...form, ...words])).replace(new RegExp(`(?<![\\w-])${word}(?![\\w-])`, 'g'), '<word>');
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Whether a form takes a flag: with it, alone or followed by a value, the
+ * form still parses, to something it does not parse to with a flag nobody
+ * defined in its place. Some parsers refuse such a flag and some take it
+ * as a positional word; either way it is not the flag's own meaning.
+ */
+const accepts = (form: readonly string[], flag: string): boolean => {
+  const stranger = flag.startsWith('--') ? '--not-a-flag' : '-Z';
+  return [[], ...VALUES.map((value) => [value])].some((tail) => {
+    const outcome = parsed(form, [flag, ...tail]);
+    return outcome !== undefined && outcome !== parsed(form, [stranger, ...tail]);
+  });
+};
+
+test('every flag a command accepts is an option in that command\'s help', async () => {
+  const commands = sectionNames(HELP_TEXT, 'Commands:').filter((name) => name !== 'help');
+  assert.deepEqual(Object.keys(COMMAND_FORMS).sort(), [...commands].sort(), 'a form to try flags on for every command in the help');
+  // Every command takes these, and the whole help says so once.
+  const global = new Set(['--help', '-h', '--version', '-v']);
+  const flags = (await parserFlags()).filter((flag) => !global.has(flag));
+  assert.ok(flags.length > 50, `read the parsers' flags (${flags.length})`);
+  for (const forms of Object.values(COMMAND_FORMS)) {
+    for (const form of forms) {
+      // A form that neither parses nor takes a flag would hide its command's flags.
+      assert.ok(parsed(form, []) !== undefined || flags.some((flag) => accepts(form, flag)), `${form.join(' ')} parses`);
+    }
+  }
+  const taken = flags.filter((flag) => Object.values(COMMAND_FORMS).some((forms) => forms.some((form) => accepts(form, flag))));
+  assert.deepEqual(flags.filter((flag) => !taken.includes(flag)), [], 'a flag no form takes: give COMMAND_FORMS a form it parses on, or VALUES a value it accepts');
+  const missing: string[] = [];
+  for (const [name, forms] of Object.entries(COMMAND_FORMS)) {
+    const help = (await run([...name.split(' '), '--help'])).stdout;
+    const listed = new Set([...sectionNames(help, 'Options:'), ...sectionNames(help, 'Agent options:')].flatMap((option) => option.split(', ')));
+    for (const flag of flags) {
+      if (!listed.has(flag) && forms.some((form) => accepts(form, flag))) {
+        missing.push(`${name} ${flag}`);
+      }
+    }
+  }
+  assert.deepEqual(missing, [], 'a flag the command takes that `stratus <command> --help` does not list as an option');
 });
