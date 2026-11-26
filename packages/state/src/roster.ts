@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { type AgentDefinition, type AvatarTheme } from '@stratusagent/core';
-import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul } from '@stratusagent/agents';
+import { agentIdWithSuffix, defineAgent, parseSoul, type ParsedSoul, type SoulFront } from '@stratusagent/agents';
 import { assertDerivedStatePath } from '@stratusagent/permissions';
 import { createHomeMemoryStore } from './home-memory.ts';
 import { ConfigFileError } from './config-file.ts';
@@ -215,6 +215,12 @@ export interface AgentSummary {
   model?: string;
   /** What a run as this agent resolves to right now. */
   runsOn: { provider: string; model?: string };
+  /**
+   * The soul's `front:` block, verbatim: the model (and provider and tools,
+   * when it names them) its conversation turns run on. Absent when the soul
+   * has none, which is every turn on `runsOn`. Set by editing the soul.
+   */
+  front?: SoulFront;
   memories: number;
   persona?: string;
   /**
@@ -333,6 +339,7 @@ export const listAgentSummaries = async (
       ...(parsed.provider ? { provider: parsed.provider } : {}),
       ...(parsed.model ? { model: parsed.model } : {}),
       runsOn: runsOnFor(parsed),
+      ...(parsed.front ? { front: parsed.front } : {}),
       memories: (await memory.list(agent.id)).entries.length,
       ...(persona ? { persona } : {}),
       ...(agent.avatar ? { avatar: agent.avatar } : {}),

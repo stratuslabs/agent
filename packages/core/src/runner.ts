@@ -61,7 +61,7 @@ import {
   leastTrusted,
   lowerSessionTrust,
   matchesSkillAllowlist,
-  matchesToolAllowlist,
+  toolListAllows,
   memoryEntryTrust,
   memoryInjectionEntries,
   type Message,
@@ -1509,14 +1509,7 @@ export class AgentRunner {
     if ((this.options.grantedToEveryAgent ?? []).includes(name)) {
       return true;
     }
-    if (allowedTools === undefined) {
-      if (this.options.unlistedTools === 'every') {
-        return true;
-      }
-      const registered = this.tools.get(name);
-      return registered === undefined || resolveToolRisk(registered) === 'safe';
-    }
-    return matchesToolAllowlist(name, allowedTools);
+    return toolListAllows(name, allowedTools, this.tools.get(name), this.options.unlistedTools);
   }
 
   /** The `skills:` entries this session's agent is held to — same sourcing as `allowedToolsFor`. */

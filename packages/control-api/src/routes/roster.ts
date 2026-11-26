@@ -156,6 +156,7 @@ export const rosterRoutes: Route[] = [
             // billing for turns that are really running, at exactly the
             // moment someone is looking to find out why.
             ...(summary?.runsOn ? { runsOn: summary.runsOn } : {}),
+            ...(summary?.front ? { front: summary.front } : {}),
             memories: summary?.memories ?? 0,
             ...(summary?.soulPath ? { soulPath: summary.soulPath } : {}),
             ...(summary?.provider ? { provider: summary.provider } : {}),

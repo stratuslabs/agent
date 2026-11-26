@@ -419,6 +419,17 @@ const renderModelLine = (model: AgentModelContext | undefined): string | undefin
  * is nothing to find. Names only; a value never comes near a prompt.
  * Written without em dashes for the reason the reply section is.
  */
+/**
+ * What a front turn is told (see `AgentRuntimeContext.front`). It holds the
+ * line on the two failures a fast front invites: starting slow work in the
+ * conversation, and saying a job is done before its result arrives.
+ */
+export const FRONT_NOTE =
+  'This turn is your conversation side: a person may be waiting, so answer within a few seconds from what you know and your tools here. '
+  + 'For anything longer, start a background task on yourself (agent.delegate with background: true, naming yourself) and say in one line that it started. '
+  + 'Send a follow-up about a running job to it with agent.messageTask, answer "how is it going" from agent.tasks, '
+  + 'and never say a job is done before its outcome arrives.';
+
 export const renderRuntimeSection = (
   runtime: AgentRuntimeContext | undefined,
   agent: Pick<AgentDefinition, 'credentials'>,
@@ -441,6 +452,9 @@ export const renderRuntimeSection = (
   const model = renderModelLine(runtime.model);
   if (model !== undefined) {
     lines.push(model);
+  }
+  if (runtime.front === true) {
+    lines.push(FRONT_NOTE);
   }
   const credentials = agent.credentials ?? [];
   lines.push(

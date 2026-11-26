@@ -93,6 +93,9 @@ export const runAgents = async (
       writeLine(streams.stdout, `    soul      ${agent.soulPath}`);
     }
     writeLine(streams.stdout, `    runs on   ${agent.provider ? describeRunsOn(agent.runsOn) : `follows your setup — currently ${describeRunsOn(agent.runsOn)}`}`);
+    if (agent.front) {
+      writeLine(streams.stdout, `    front     ${agent.front.provider ? `${agent.front.provider} · ` : ''}${agent.front.model}, for conversation turns`);
+    }
     writeLine(streams.stdout, `    memory    ${agent.memories === 0 ? 'nothing yet' : `${agent.memories} remembered fact${agent.memories === 1 ? '' : 's'}`}`);
     if (agent.persona) {
       writeLine(streams.stdout, `    persona   ${agent.persona}`);

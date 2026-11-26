@@ -398,6 +398,26 @@ export const matchesToolAllowlist = (toolName: string, allowlist: readonly strin
   matchesGlobbedAllowlist(toolName, allowlist, '.*');
 
 /**
+ * Whether an agent's `tools:` list lets it call `name`, before any tool a
+ * host grants every agent. An omitted list is the tools registered at risk
+ * `safe` (or every tool where the host passes `unlistedTools: 'every'`); a
+ * name nothing registered passes, so the call is refused as not found. The
+ * runner's gate and a host narrowing a turn's tools (a soul's `front:`)
+ * both read the list through here, so the two can't disagree.
+ */
+export const toolListAllows = (
+  name: string,
+  allowlist: readonly string[] | undefined,
+  registered: Pick<Tool, 'risk'> | undefined,
+  unlistedTools: UnlistedTools | undefined,
+): boolean => {
+  if (allowlist === undefined) {
+    return unlistedTools === 'every' || registered === undefined || resolveToolRisk(registered) === 'safe';
+  }
+  return matchesToolAllowlist(name, allowlist);
+};
+
+/**
  * Whether an allowlist entry and a declared namespace select any of the
  * same tools — true when either sits under the other.
  *

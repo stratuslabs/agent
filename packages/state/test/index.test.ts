@@ -187,6 +187,56 @@ test('fallback stickiness is per session, never per pooled provider', async () =
   assert.equal((flakyAgain.parts[0] as { text: string }).text, 'fallback');
 });
 
+test('a per-call fallback answers the call that failed and tries the primary again on the next, recording nothing', async () => {
+  // A soul's front: falls back to the agent's own model like this: one rate
+  // limit on the fast model must not leave the conversation slow for good.
+  const { createFallbackWrappedProvider, FALLBACK_ACTIVE_METADATA_KEY } = await import('../src/index.ts');
+  const session = { id: 'dm', agent: { id: 'a', name: 'A' }, status: 'running' as const, messages: [], createdAt: '', updatedAt: '' };
+  let primaryDown = true;
+  const asked: string[] = [];
+  const primary = {
+    name: 'front',
+    async generate() {
+      asked.push('front');
+      if (primaryDown) {
+        throw new Error('rate_limit_error');
+      }
+      return { parts: [{ type: 'text' as const, text: 'front' }] };
+    },
+  };
+  const fallback = {
+    name: 'main',
+    async generate() {
+      asked.push('main');
+      return { parts: [{ type: 'text' as const, text: 'main' }] };
+    },
+  };
+  const notices: unknown[] = [];
+  const saved: unknown[] = [];
+  const resets: unknown[] = [];
+  const wrapped = createFallbackWrappedProvider(
+    primary as never,
+    fallback as never,
+    (error) => notices.push(error),
+    async (saving) => {
+      saved.push(saving);
+    },
+    { perCall: true },
+  );
+
+  const first = await wrapped.generate({ session, onDelta: async (delta: unknown) => { resets.push(delta); } } as never);
+  assert.equal((first.parts[0] as { text: string }).text, 'main');
+  assert.equal(notices.length, 1, 'the switch is still told');
+  assert.deepEqual(resets, [{ type: 'reset', reason: 'fallback' }], 'and still reset in band');
+  assert.equal((session as { metadata?: Record<string, unknown> }).metadata?.[FALLBACK_ACTIVE_METADATA_KEY], undefined);
+  assert.deepEqual(saved, [], 'nothing about the switch is saved');
+
+  primaryDown = false;
+  const second = await wrapped.generate({ session } as never);
+  assert.equal((second.parts[0] as { text: string }).text, 'front');
+  assert.deepEqual(asked, ['front', 'main', 'front']);
+});
+
 test('the fallback notice hears the switching session and is awaited before the fallback answers', async () => {
   // The daemon masks the primary's error against the session's stored
   // secrets before it logs it, which is an async read: the wrapper has to

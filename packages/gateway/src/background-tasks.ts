@@ -100,7 +100,8 @@ export interface BackgroundTasksDeps {
   stateHome: string;
   store: ShardedSessionStore;
   bus: Pick<EventBus, 'emit'>;
-  dispatchInternal: (input: DispatchInput) => Promise<Session>;
+  /** `conversation` as in `TurnDispatch.dispatchInternal`: true only for a notice to a person's conversation. */
+  dispatchInternal: (input: DispatchInput, conversation?: boolean) => Promise<Session>;
   onSessionChain: <T>(sessionId: string, work: () => Promise<T>) => Promise<T>;
   /**
    * The same chain, for a worker's turn: work a shutdown's drain doesn't
@@ -240,13 +241,15 @@ export const createBackgroundTasks = ({
         if (repeated !== undefined) {
           return repeated;
         }
+        // A conversation turn: the outcome lands where a person asked for
+        // the work, so an agent with a front writes it up there as its front.
         return dispatchInternal({
           sessionId: notice.sessionId,
           agentId: notice.agentId,
           userMessage: notice.text,
           idempotencyKey: notice.idempotencyKey,
           metadata: { [SENDER_TRUST_METADATA_KEY]: notice.trust },
-        });
+        }, true);
       });
     },
     appendFallback(notice) {
