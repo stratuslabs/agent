@@ -36,6 +36,7 @@ import {
   BUILTIN_EXECUTOR_NAME,
   BUILTIN_MEMORY_STORE_NAME,
   createDemoTool,
+  toolsForRuntime,
   createFileCredentialResolver,
   credentialValuesFor,
   createHomeMemoryStore,
@@ -427,7 +428,8 @@ export const createAgentRuntime = async (
     const unlistedTools = unlistedToolsFor(runEnv);
     const runner = new AgentRunner({
       provider: runtimeProvider,
-      tools,
+      // demo.echo only for the demo provider, which is what calls it.
+      tools: toolsForRuntime(tools, options.runtime),
       executor: executor ?? createLocalCommandExecutor(),
       approvals: createApprovalPolicy(
         approvalMode,

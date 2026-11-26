@@ -347,6 +347,8 @@ export {
 export {
   createDemoTool,
   createDemoProvider,
+  DEMO_TOOL_NAME,
+  toolsForRuntime,
   FALLBACK_ACTIVE_METADATA_KEY,
   PROVIDER_STATE_METADATA_KEYS,
   redactProviderReplayState,
