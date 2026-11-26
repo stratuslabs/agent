@@ -324,8 +324,9 @@ commands granted by name, and sites, each an "always allow" somebody answered. F
 running daemon when one is serving (--gateway, --token),
 else from ~/.stratus/agents/<id>/whitelist.json; --format
 json. "stratus grants revoke <agent> --tool <name> |
---scope "<command>" | --origin <origin>" takes one back,
-and a running daemon stops honouring it at once. Also
+--scope "<command>" | --origin <origin> | --destination
+<channel:id>" takes one back, and a running daemon stops
+honouring it at once. Also
 lists approvals.commands from config: the daemon's own
 when one is serving, else the file --config names (or
 the one stratus serve would find)`,
@@ -535,13 +536,19 @@ const OPTIONS: readonly OptionHelp[] = [
   },
   {
     name: '--format',
-    for: ['run', 'doctor', 'plugins', 'health', 'events', 'sessions', 'tasks', 'schedules', 'grants', 'logs', 'agents', 'memory list', 'memory search', 'memory passes'],
+    for: ['run', 'doctor', 'plugins', 'health', 'events', 'sessions', 'tasks', 'schedules', 'grants', 'logs', 'agents', 'memory list', 'memory search', 'memory forget', 'memory audit', 'memory pin', 'memory import', 'memory reassert', 'memory passes', 'memory undo-pass'],
     text: `Output format: text or json (default: text)`,
   },
   {
     name: '--no-events',
     for: ['run', 'serve'],
     text: `Hide event-by-event progress lines in text mode`,
+  },
+  {
+    name: '--events',
+    for: ['chat'],
+    text: `chat: print every event of a turn as it happens, not only
+the tools it uses`,
   },
   {
     name: '--approvals',
@@ -581,8 +588,19 @@ Default headless, or the config file's "approvals.mode"`,
     name: '--gateway',
     for: ['agents', 'skill reload', 'restart', 'session rollover', 'sessions', 'health', 'events', 'tasks', 'grants'],
     text: `agents / skill reload / restart / session rollover /
-sessions / health / events: a running daemon's control API (all but
-agents default to the daemon ~/.stratus/gateway.json names)`,
+sessions / health / events / tasks / grants: a running
+daemon's control API (all but agents default to the daemon
+~/.stratus/gateway.json names; grants reads the files
+instead when none is serving)`,
+  },
+  {
+    name: '--agent',
+    for: ['logs', 'sessions', 'tasks', 'skill add', 'credential set', 'credential env', 'credential remove', 'signin set', 'signin remove', 'channel set', 'channel remove', 'people'],
+    text: `logs / sessions / tasks: only this agent's. skill add: also
+enable the skills in its soul. credential set / remove,
+people: its own entry or list, not the shared one.
+credential env, signin, channel: the agent it is for
+(required)`,
   },
   {
     name: '--trust',
@@ -629,6 +647,17 @@ instead of landing it external`,
     text: `Bearer token for --gateway (default: ~/.stratus/gateway-token)`,
   },
   {
+    name: '--skill',
+    for: ['skill add'],
+    text: `skill add: pick one skill from a multi-skill repo (repeatable)`,
+  },
+  {
+    name: '--force',
+    for: ['template add', 'skill add'],
+    text: `template add / skill add: replace an agent or skill already
+installed under the same name`,
+  },
+  {
     name: '--no-reload',
     for: ['skill add'],
     text: `skill add: install without reloading a running daemon`,
@@ -637,6 +666,77 @@ instead of landing it external`,
     name: '-y, --yes',
     for: ['template add'],
     text: `template add: install without the review prompt`,
+  },
+  {
+    name: '--env',
+    for: ['credential set'],
+    text: `credential set: also bind the key to this variable for the
+--agent agent's shell, as credential env does`,
+  },
+  {
+    name: '--remove',
+    for: ['credential env'],
+    text: `credential env: drop the binding instead of making it`,
+  },
+  {
+    name: '--tool',
+    for: ['grants'],
+    text: `grants revoke: a standing tool grant, by tool name. A revoke
+names exactly one of --tool, --scope, --origin, --destination`,
+  },
+  {
+    name: '--scope',
+    for: ['grants'],
+    text: `grants revoke: a command scope, quoted (--scope "git push")`,
+  },
+  {
+    name: '--origin',
+    for: ['grants'],
+    text: `grants revoke: a site, by its origin (https://example.com)`,
+  },
+  {
+    name: '--destination',
+    for: ['grants'],
+    text: `grants revoke: a conversation granted for message.read or
+message.send, as <channel:id> (slack:C0123ABCD)`,
+  },
+  {
+    name: '--approver',
+    for: ['people'],
+    text: `people add: as an approver as well as a teammate; people
+remove: take away approving only`,
+  },
+  {
+    name: '--follow, -f',
+    for: ['logs'],
+    text: `logs: keep printing new records, across rotations`,
+  },
+  {
+    name: '--lines, -n',
+    for: ['logs'],
+    text: `logs: how many records of backlog to print (default: 50)`,
+  },
+  {
+    name: '--session',
+    for: ['logs'],
+    text: `logs: only this session's records`,
+  },
+  {
+    name: '--no-login',
+    for: ['service'],
+    text: `service install: install without the start-at-login trigger`,
+  },
+  {
+    name: '--live',
+    for: ['doctor'],
+    text: `doctor: also ask each provider your runs use whether it
+accepts the key`,
+  },
+  {
+    name: '--check',
+    for: ['update'],
+    text: `update: report what it would do without doing any of it
+(exit 1 when something is actionable)`,
   },
   {
     name: '--reason',
@@ -648,6 +748,17 @@ instead of landing it external`,
     for: ['restart'],
     text: `restart: seconds the daemon lets in-flight turns finish
 before aborting them (default: 30)`,
+  },
+  {
+    name: '--idle-timeout',
+    for: ['serve'],
+    text: `serve: seconds of provider silence before the watchdog aborts
+a turn (default: 120)`,
+  },
+  {
+    name: '--no-log-file',
+    for: ['serve'],
+    text: `serve: do not write ~/.stratus/logs/stratusd.jsonl`,
   },
   {
     name: '--no-api',
