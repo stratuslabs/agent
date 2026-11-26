@@ -26,6 +26,7 @@ export {
   type SoulFront,
   FRONT_TASK_TOOLS,
   DEFAULT_FRONT_TOOLS,
+  FRONT_MAX_STEPS,
   frontToolEntries,
   parseSoul,
   formatSoul,

@@ -34,6 +34,8 @@ import {
   conversationContextFrom,
   STRATUS_SKILL_ID,
   redactSecrets,
+  matchesToolAllowlist,
+  toolListAllows,
   type AgentDefinition,
   type AgentRuntimeContext,
   type AgentMemoryStore,
@@ -75,6 +77,9 @@ import {
   reportsToHint,
   type ParsedSoul,
   type ScheduleDestination,
+  type SoulFront,
+  frontToolEntries,
+  FRONT_MAX_STEPS,
   loadStratusSkill,
   STRATUS_SKILL_PATH,
 } from '@stratusagent/agents';
@@ -1499,7 +1504,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     stateHome: stateDir,
     store,
     bus,
-    dispatchInternal: (input) => dispatchInternal(input),
+    dispatchInternal: (input, conversation) => dispatchInternal(input, [], undefined, undefined, conversation),
     onSessionChain: (sessionId, work) => onSessionChain(sessionId, work),
     onWorkerChain: (sessionId, work) => onSessionChain(sessionId, work, undefined, { background: true }),
     settleRepeat: (sessionId, idempotencyKey, agentId) => settleRepeat(sessionId, idempotencyKey, agentId, undefined, undefined),
@@ -1606,13 +1611,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // reads the agent's memory; no skill catalog, so its prompt is its
   // instruction and its tools; and grants nothing to every agent, since
   // the credential request asks a person.
-  const runnerFor = (config: RuntimeConfig, agentId: string, subAgent = false): AgentRunner => {
+  const runnerFor = (config: RuntimeConfig, agentId: string, subAgent = false, front = false): AgentRunner => {
     // The budget is a provider-construction input too (the harness
     // runtimes take it as their inner limit), so it is part of the key:
     // two agents on one model with different budgets get their own runners.
-    const maxTurns = options.maxTurnsFor?.(agentId) ?? options.maxTurns;
-    const autoContinue = options.autoContinueFor?.(agentId);
-    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}:${autoContinue ?? 'off'}${subAgent ? ':sub' : ''}`;
+    const agentMaxTurns = options.maxTurnsFor?.(agentId) ?? options.maxTurns;
+    // A front turn stops at its own small cap, or the agent's if that is
+    // lower, and never auto-continues: a front that loops must not hold the
+    // conversation it exists to keep moving. It wraps up instead, saying
+    // where it got to, as any turn at its cap does.
+    const maxTurns = front ? Math.min(FRONT_MAX_STEPS, agentMaxTurns ?? FRONT_MAX_STEPS) : agentMaxTurns;
+    const autoContinue = front ? undefined : options.autoContinueFor?.(agentId);
+    const key = `${runnerKeyFor(config)}:${maxTurns ?? 'default'}:${autoContinue ?? 'off'}${subAgent ? ':sub' : ''}${front ? ':front' : ''}`;
     const existing = runners.get(key);
     if (existing) {
       return existing;
@@ -1662,8 +1672,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       bus,
       agents: registry,
       // Asking a person for a key is harmless to grant: they decide
-      // everything after the question, so no soul has to list it.
-      grantedToEveryAgent: subAgent ? [] : [CREDENTIAL_REQUEST_TOOL_NAME],
+      // everything after the question, so no soul has to list it. Not to a
+      // front, which holds exactly the front tools; a task asks instead.
+      grantedToEveryAgent: subAgent || front ? [] : [CREDENTIAL_REQUEST_TOOL_NAME],
       unlistedTools: unlistedTools(),
       ...(subAgent ? {} : { skills: skillCatalog, memory }),
       streaming: true,
@@ -2303,6 +2314,38 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   };
 
   /**
+   * The runtime a front turn runs on: the agent's own, resolved through the
+   * same chain with the front's model (and provider, when it names one)
+   * pinned in place of the soul's. Without the configured fallback, which
+   * was chosen for the agent's own model.
+   */
+  const frontRuntimeFor = async (source: AgentSource, front: SoulFront): Promise<RuntimeConfig> => {
+    const soul = source.soul;
+    const resolved = await runtimeForAgent(soul === undefined ? source : {
+      ...source,
+      soul: { ...soul, model: front.model, ...(front.provider !== undefined ? { provider: front.provider } : {}) },
+    });
+    const { fallback: _fallback, ...primary } = resolved as RuntimeConfig & { fallback?: unknown };
+    return primary as RuntimeConfig;
+  };
+
+  /**
+   * The definition a front turn runs as: the agent, held to the front's
+   * tools and, inside those, to what its own `tools:` allows. Written out as
+   * exact names read off the registry, so the runner's one allowlist gate
+   * holds both lists, and the agent's list is read through `toolListAllows`,
+   * the rule that gate applies, rather than a copy of it.
+   */
+  const frontDefinitionFor = (agent: AgentDefinition, front: SoulFront): AgentDefinition => {
+    const entries = frontToolEntries(front);
+    const unlisted = unlistedTools();
+    const allowed = tools.list()
+      .filter((tool) => matchesToolAllowlist(tool.name, entries) && toolListAllows(tool.name, agent.tools, tool, unlisted))
+      .map((tool) => tool.name);
+    return { ...agent, tools: allowed };
+  };
+
+  /**
    * Whether the turn about to run streams deltas, which arms the idle
    * watchdog — on the sticky fallback when the session already switched to
    * it, since that is the provider the turn will be served by.
@@ -2372,6 +2415,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     withWatchdog,
     onTurnRuntime,
     runtimeForAgent,
+    frontRuntimeFor,
+    frontDefinitionFor,
     watchdogStreamsFor,
     reachesHarness,
     settleLeftForNextStart,

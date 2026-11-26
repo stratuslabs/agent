@@ -8,6 +8,7 @@ import {
   InMemorySessionStore,
   isLanguageTag,
   renderSystemPromptParts,
+  FRONT_NOTE,
   renderSystemPromptSections,
   type MemoryEntry,
   type ModelProvider,
@@ -353,6 +354,21 @@ test('a channel name never reaches the prompt, and a person\'s only when it is p
   assert.equal(conversationContextFrom({ conversation: { kind: 'stage' } }), undefined);
   assert.equal(conversationContextFrom({ conversation: 'public' }), undefined);
   assert.equal(conversationContextFrom(undefined), undefined);
+});
+
+test('a front turn is told it is the conversation side, and any other turn is not', () => {
+  const render = (front: boolean | undefined): string => {
+    const input = { ...request(), runtime: { workspace: '/w', ...(front !== undefined ? { front } : {}) } };
+    return renderSystemPromptParts(input).find((part) => part.kind === 'runtime')?.text ?? '';
+  };
+  const front = render(true);
+  assert.ok(front.includes(FRONT_NOTE));
+  assert.match(front, /answer within a few seconds/);
+  assert.match(front, /background task on yourself/);
+  assert.match(front, /never say a job is done before its outcome arrives/);
+  assert.doesNotMatch(front, /—/);
+  assert.equal(render(undefined).includes(FRONT_NOTE), false);
+  assert.equal(render(false).includes(FRONT_NOTE), false);
 });
 
 test('a host that says how the agent runs tells it where its soul is, and that it is already loaded', () => {

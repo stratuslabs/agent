@@ -108,6 +108,13 @@ export const DEFAULT_FRONT_TOOLS: readonly string[] = [
   'fs.search',
 ];
 
+/**
+ * Tool steps a front turn takes before it wraps up, or the agent's own
+ * budget when that is lower. A proposal from the spec, held small so a
+ * front that loops can't hold the conversation; the live checks may move it.
+ */
+export const FRONT_MAX_STEPS = 8;
+
 /** Every tool entry a front turn is held to, before the agent's own `tools:` narrows it further. */
 export const frontToolEntries = (front: SoulFront): string[] => [
   ...FRONT_TASK_TOOLS,

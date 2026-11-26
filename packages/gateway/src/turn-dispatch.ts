@@ -20,10 +20,11 @@ import {
   type Session,
   type SteeredMessage,
 } from '@stratusagent/core';
-import { isDelegatedSession, withoutDelegation } from '@stratusagent/agents';
+import { isDelegatedSession, type SoulFront, withoutDelegation } from '@stratusagent/agents';
 import type { AgentSource } from './agent-source.ts';
 import type { ShardedSessionStore } from './sessions.ts';
 import type { DispatchInput, GatewayOptions } from './types.ts';
+import { isScheduleSessionId } from './schedules.ts';
 import {
   crossIdentityError,
   EXECUTOR_METADATA_KEY,
@@ -48,7 +49,7 @@ export interface TurnDispatchDeps {
     metadata: JsonObject | undefined,
     subAgent?: boolean,
   ) => AgentRuntimeContext;
-  runnerFor: (config: RuntimeConfig, agentId: string, subAgent?: boolean) => AgentRunner;
+  runnerFor: (config: RuntimeConfig, agentId: string, subAgent?: boolean, front?: boolean) => AgentRunner;
   withWatchdog: <T>(
     sessionId: string,
     agentId: string,
@@ -63,6 +64,8 @@ export interface TurnDispatchDeps {
     work: () => Promise<T>,
   ) => Promise<T>;
   runtimeForAgent: (source: AgentSource) => Promise<RuntimeConfig>;
+  frontRuntimeFor: (source: AgentSource, front: SoulFront) => Promise<RuntimeConfig>;
+  frontDefinitionFor: (agent: AgentDefinition, front: SoulFront) => AgentDefinition;
   watchdogStreamsFor: (
     session: Pick<Session, 'metadata'> | undefined,
     config: RuntimeConfig,
@@ -83,6 +86,8 @@ export const createTurnDispatch = ({
   withWatchdog,
   onTurnRuntime,
   runtimeForAgent,
+  frontRuntimeFor,
+  frontDefinitionFor,
   watchdogStreamsFor,
   reachesHarness,
   settleLeftForNextStart,
@@ -104,6 +109,16 @@ export const createTurnDispatch = ({
      * stopping.
      */
     steer?: (turnSignal: AbortSignal) => Promise<SteeredMessage | undefined>,
+    /**
+     * True for a turn carrying a person's message: the public `dispatch`
+     * and a task's outcome notice. An agent whose soul has a `front:` runs
+     * such a turn as its front (see `SoulFront`): the front's model, the
+     * front's tools inside its own, a small step cap. Every other caller
+     * (schedules, triggers, task workers, delegations, sub-agents) leaves
+     * it false and keeps the agent's own model and tools, so a new caller
+     * gets today's behavior unless it says otherwise.
+     */
+    conversation = false,
   ): Promise<Session> => {
     // Re-read on every turn, not once at start: a newer build that stamps
     // the home while this daemon is serving has formats this build does not
@@ -136,7 +151,12 @@ export const createTurnDispatch = ({
       );
     }
     const source = await refreshAgent(agentId);
-    const agent = subAgent ?? source.definition;
+    // A notice can land on a schedule's session (a task a firing started):
+    // nobody is waiting there, so it is no conversation turn.
+    const front = conversation && subAgent === undefined && !isScheduleSessionId(input.sessionId)
+      ? source.soul?.front
+      : undefined;
+    const agent = subAgent ?? (front !== undefined ? frontDefinitionFor(source.definition, front) : source.definition);
     if (subAgent !== undefined && existing) {
       throw new Error(`Session ${input.sessionId} already exists; a sub-agent's session is new every time.`);
     }
@@ -151,8 +171,8 @@ export const createTurnDispatch = ({
       );
     }
 
-    const config = await runtimeForAgent(source);
-    const runner = runnerFor(config, source.definition.id, subAgent !== undefined);
+    const config = front !== undefined ? await frontRuntimeFor(source, front) : await runtimeForAgent(source);
+    const runner = runnerFor(config, source.definition.id, subAgent !== undefined, front !== undefined);
     // Which executor the turn's tool calls run through — the built-in
     // under the name `stratus run` has always recorded, a contributed one
     // under its registered name — so a transcript says where a command
@@ -176,10 +196,18 @@ export const createTurnDispatch = ({
     }
 
     // A sub-agent's session is new, but may start on its parent's fallback.
-    const { switchedToFallback, effectiveStreams, fallbackStreams } = watchdogStreamsFor(
+    const watched = watchdogStreamsFor(
       existing ?? (subAgent !== undefined ? { metadata } : undefined),
       config,
     );
+    const { effectiveStreams, fallbackStreams } = watched;
+    // A front runs on no configured fallback, so a conversation that once
+    // switched to the agent's own fallback is not on one for a front turn.
+    const switchedToFallback = front !== undefined ? false : watched.switchedToFallback;
+    const runtimeFor = (turnMetadata: JsonObject | undefined): AgentRuntimeContext => ({
+      ...runtimeContextFor(source, config, switchedToFallback, turnMetadata, subAgent !== undefined),
+      ...(front !== undefined ? { front: true } : {}),
+    });
     // Recorded with a keyed message so a restart judges the turn by what it
     // could have run on, not by whatever the config resolves to by then.
     // The fallback counts: a turn can switch to it mid-run. Once a session
@@ -250,7 +278,7 @@ export const createTurnDispatch = ({
           ...(absorbedKeys.length > 0 ? { absorbedKeys: [...absorbedKeys] } : {}),
           ...(hostedLoop ? { hostedLoop } : {}),
           ...(input.metadata ? { metadata: input.metadata } : {}),
-          runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata),
+          runtime: runtimeFor(input.metadata),
           ...(steer !== undefined ? { steer: () => steer(signal) } : {}),
           signal,
         });
@@ -268,7 +296,7 @@ export const createTurnDispatch = ({
         ...(hostedLoop ? { hostedLoop } : {}),
         ...(input.earlier !== undefined && input.earlier.length > 0 ? { earlier: input.earlier } : {}),
         metadata,
-        runtime: runtimeContextFor(source, config, switchedToFallback, input.metadata, subAgent !== undefined),
+        runtime: runtimeFor(input.metadata),
         ...(steer !== undefined ? { steer: () => steer(signal) } : {}),
         signal,
       });
