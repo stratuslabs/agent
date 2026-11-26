@@ -207,10 +207,22 @@ export const createTurnDispatch = ({
     // A front runs on no configured fallback, so a conversation that once
     // switched to the agent's own fallback is not on one for a front turn.
     const switchedToFallback = front !== undefined ? false : watched.switchedToFallback;
-    const runtimeFor = (turnMetadata: JsonObject | undefined): AgentRuntimeContext => ({
-      ...runtimeContextFor(source, config, switchedToFallback, turnMetadata, subAgent !== undefined),
-      ...(front !== undefined ? { front: true } : {}),
-    });
+    const runtimeFor = (turnMetadata: JsonObject | undefined): AgentRuntimeContext => {
+      const context = runtimeContextFor(source, config, switchedToFallback, turnMetadata, subAgent !== undefined);
+      if (front === undefined) {
+        return context;
+      }
+      // A call the front model fails is answered by the agent's own, so the
+      // front's model line names that as its fallback: the model taking
+      // over is then told it is the one answering (the wrapper marks the
+      // request), instead of being told it is the front's.
+      const own = main.provider !== 'demo' && main.model !== undefined ? { provider: main.provider, model: main.model } : undefined;
+      return {
+        ...context,
+        front: true,
+        ...(context.model !== undefined && own !== undefined ? { model: { ...context.model, fallback: own } } : {}),
+      };
+    };
     // Recorded with a keyed message so a restart judges the turn by what it
     // could have run on, not by whatever the config resolves to by then.
     // The fallback counts: a turn can switch to it mid-run. Once a session

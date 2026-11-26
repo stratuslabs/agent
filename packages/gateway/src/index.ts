@@ -1675,8 +1675,11 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
       ? createFallbackWrappedProvider(
         createRuntimeProvider(config, undefined, executeHosted, maxTurns, undefined, providerContributions),
         ownProvider(main),
-        (error) => {
-          warn(`${agentId}: the front model failed (${error instanceof Error ? error.name : 'unknown error'}); this call answers on the agent's own model`);
+        // Named from the session, not `agentId`: two agents whose front and
+        // own runtimes match share this runner, and the first one's id
+        // would be the one closed over.
+        (error, session) => {
+          warn(`${session.agent.id}: the front model failed (${error instanceof Error ? error.name : 'unknown error'}); this call answers on the agent's own model`);
         },
         undefined,
         { perCall: true },

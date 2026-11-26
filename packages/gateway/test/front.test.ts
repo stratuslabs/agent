@@ -250,10 +250,14 @@ test('an agent without front: runs a DM turn on its own model and tools, as befo
   assert.equal(systemOf(captured[0]).includes(FRONT_NOTE), false);
 });
 
-test('when the front model fails, that call answers on the agent\'s own model, the log says so without the conversation, and the next turn tries the front again', async () => {
+test('when the front model fails, that call answers on the agent\'s own model, told so, the log names the agent without the conversation, and the next turn tries the front again', async () => {
+  // Two agents whose front and own runtimes match share one runner, so the
+  // log line has to name the agent from the session, not from whichever
+  // agent built the runner first.
   const home = await homeWith(AVA_WITH_FRONT);
+  await writeFile(path.join(home, '.stratus', 'agents', 'bea.md'), AVA_WITH_FRONT.replace('name: Ava', 'name: Bea').replace('id: ava', 'id: bea'));
   const captured: CapturedRequest[] = [];
-  let frontDown = true;
+  let frontDown = false;
   const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body)) as CapturedRequest;
     captured.push(body);
@@ -273,19 +277,25 @@ test('when the front model fails, that call answers on the agent\'s own model, t
   let first;
   let second;
   try {
+    await gateway.dispatch({ sessionId: 'bea-first', agentId: 'bea', userMessage: 'hello' });
+    frontDown = true;
     first = await gateway.dispatch({ sessionId: 'front-down', agentId: 'ava', userMessage: 'my PIN is 4321' });
     frontDown = false;
     second = await gateway.dispatch({ sessionId: 'front-down', agentId: 'ava', userMessage: 'and now?' });
   } finally {
     await gateway.stop();
   }
-  assert.deepEqual(captured.map((request) => request.model), ['front-model', 'main-model', 'front-model']);
+  assert.deepEqual(captured.map((request) => request.model), ['front-model', 'front-model', 'main-model', 'front-model']);
   assert.equal(first.messages.at(-1)?.content, 'answered by main-model');
   assert.equal(second.messages.at(-1)?.content, 'answered by front-model');
-  // The main model answering a front turn still holds only the front tools.
-  assert.deepEqual(toolsOf(captured[1]), toolsOf(captured[0]));
+  // The main model answering a front turn still holds only the front tools,
+  // and is told it is the one answering, not the front's model.
+  assert.deepEqual(toolsOf(captured[2]), toolsOf(captured[1]));
+  assert.match(systemOf(captured[1]), /configured to answer as you is front-model on openai, with main-model on openai as its fallback\./);
+  assert.match(systemOf(captured[2]), /main-model on openai is the one answering now/);
+  assert.doesNotMatch(systemOf(captured[3]), /is the one answering now/);
   const said = warnings.filter((line) => line.includes('the front model failed'));
-  assert.equal(said.length, 1, warnings.join('\n'));
+  assert.deepEqual(said, ['ava: the front model failed (Error); this call answers on the agent\'s own model'], warnings.join('\n'));
   assert.equal(warnings.some((line) => line.includes('4321')), false, warnings.join('\n'));
   // Nothing sticky: the session was never switched to a fallback.
   assert.equal(second.metadata?.fallbackActive, undefined);
