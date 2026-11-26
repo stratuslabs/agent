@@ -2343,6 +2343,37 @@ test('a broken project config in the daemon\'s folder is skipped for the global 
   assert.ok(warnings.some((line) => line.includes('last known-good')), warnings.join('\n'));
 });
 
+test('a project config the daemon ran on that breaks mid-edit keeps routing to the same default agent', async () => {
+  const home = await newHome();
+  // The global config names a default soul. The project config shadows it,
+  // and can't set a soul itself, so the default agent here is the built-in.
+  await writeSoul(home, 'bob.md', '---\nname: Bob\ntools: []\n---\n\nYou are Bob.\n');
+  await writeFile(path.join(home, '.stratus', 'config.json'), JSON.stringify({
+    provider: 'openai',
+    model: 'model-global',
+    soul: path.join(home, '.stratus', 'agents', 'bob.md'),
+  }));
+  const project = path.join(home, 'checkout');
+  await mkdir(project, { recursive: true });
+  const projectConfig = path.join(project, 'stratus.config.json');
+  await writeFile(projectConfig, JSON.stringify({ provider: 'openai', model: 'model-project' }));
+
+  const fetchImpl = (async () => openAiText('real provider reply')) as typeof fetch;
+  const env = { homeDir: home, cwd: project, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl };
+  const gateway = createGateway({ env, idleTimeoutMs: 0, warn: () => {} });
+  await gateway.start();
+  const before = await gateway.dispatch({ sessionId: 'route-1', userMessage: 'hi' });
+
+  // Mid-edit, discovery would skip the project file for the global one,
+  // whose default soul is Bob. A turn still on the project snapshot must
+  // not be handed to Bob's persona, tools and memory meanwhile.
+  await writeFile(projectConfig, '{ "provider": ');
+  const during = await gateway.dispatch({ sessionId: 'route-2', userMessage: 'hi' });
+  await gateway.stop();
+  assert.equal(before.agent.id, 'stratus');
+  assert.equal(during.agent.id, 'stratus');
+});
+
 test('an empty STRATUS_PROVIDER is no default at all for the credential scrub', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: anthropic\nmodel: model-a\n---\n\nYou are Ava.\n');

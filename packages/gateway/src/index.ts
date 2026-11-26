@@ -255,6 +255,7 @@ import {
   ConfigFileError,
   loadConfigFile,
   discoverConfigLocation,
+  type ConfigDiscovery,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   runsOnHarness,
@@ -764,6 +765,25 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // reason rather than on every dispatch.
   let lastSkippedConfig: string | undefined;
   /**
+   * Config discovery for a dispatch. A project config in the daemon's
+   * folder that won't load is skipped for the global one, so a broken
+   * untrusted file is never the reason nothing dispatches. One the daemon
+   * was running on is an operator mid-edit, though: that throws the
+   * ConfigFileError the last-known-good paths handle, so neither the
+   * runtime nor the default agent moves to another file's settings.
+   */
+  const discoverDispatchConfig = async (): Promise<ConfigDiscovery> => {
+    const discovery = await discoverConfigLocation(
+      options.selection?.configPath ? { configPath: options.selection.configPath } : {},
+      env,
+    );
+    const { skipped } = discovery;
+    if (skipped !== undefined && lastGoodConfigSnapshot?.path === skipped.path) {
+      throw new ConfigFileError(skipped.path, new Error(skipped.reason));
+    }
+    return discovery;
+  };
+  /**
    * Read from the home once, on first use, which is after the migrations
    * `serve` runs before it starts the gateway. It changes only when 0005
    * first records it, and that happens before a daemon of this build runs.
@@ -795,6 +815,7 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // happens at dispatch, where pin demotion applies.
     let resolved: { soul: ParsedSoul; path: string } | undefined;
     try {
+      await discoverDispatchConfig();
       resolved = await resolveConfiguredSoul({ ...options.selection }, env);
     } catch (error) {
       warn(`could not load the configured default soul: ${error instanceof Error ? error.message : String(error)}`);
@@ -2237,22 +2258,10 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // in a real conversation. With no known-good snapshot to fall back
     // on, failing is the honest outcome. Credential and provider errors
     // are never masked — only the file itself degrades.
-    //
-    // A project config in the daemon's folder that won't load is skipped
-    // by discovery for the global one, so a broken untrusted file is never
-    // the reason nothing dispatches. One the daemon was running on is the
-    // mid-edit case again, though, and keeps its last good snapshot rather
-    // than moving to another file's provider.
+    // A project config that won't load: see discoverDispatchConfig.
     let configSnapshot: NonNullable<RuntimeSelection['presetConfig']>;
     try {
-      const { location, skipped } = await discoverConfigLocation(
-        options.selection?.configPath ? { configPath: options.selection.configPath } : {},
-        env,
-      );
-      if (skipped !== undefined && lastGoodConfigSnapshot?.path === skipped.path) {
-        // The catch below serves the last good snapshot and says so.
-        throw new ConfigFileError(skipped.path, new Error(skipped.reason));
-      }
+      const { location, skipped } = await discoverDispatchConfig();
       const skippedLine = skipped === undefined
         ? undefined
         : `ignoring ${skipped.path}, which can't be used (${skipped.reason}); serving on ${location?.path ?? 'built-in defaults'}`;
