@@ -243,6 +243,11 @@ with piped input. To change it later, edit `approvals.posture`; see
   stopped the daemon it answered through), the closing lines end with the
   `stratus serve` command that brings it online.
 
+  Backing out of this menu, or piped answers running out, saves too. Input
+  that ends before its first answer (`stratus setup </dev/null`, say) saves
+  nothing: setup exits 1 and says it needs a terminal or answers on stdin,
+  and the always-on service is left as it was.
+
 ## What Save & finish offers
 
 The CLI ships no transport, so a fresh machine that connected Slack finishes

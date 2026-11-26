@@ -893,7 +893,14 @@ export const runSetup = async (
         'Save & finish',
       ]);
 
-      // Backing out of the top level (Esc, or the input ending) saves.
+      // Backing out of the top level (Esc, or the input ending) saves —
+      // unless the input ended before its first answer. `stratus setup
+      // </dev/null` chose no provider, agent, or service, so saving the
+      // defaults and installing the service would be setup choosing them.
+      if (choice.kind === 'back' && prompter.isClosed() && !prompter.answered()) {
+        writeLine(streams.stderr, 'Setup needs a terminal, or its answers on stdin. The input ended before the first answer, so nothing was saved.');
+        return 1;
+      }
       if (choice.kind !== 'index' || choice.index === 8) {
         break;
       }
