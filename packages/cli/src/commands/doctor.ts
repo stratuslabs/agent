@@ -233,7 +233,30 @@ export type DoctorDaemon =
   /** `stratus update` holds the home to migrate it; the daemon is stopped until it finishes. */
   | { state: 'updating' }
   | { state: 'unreachable'; url: string }
-  | { state: 'running'; url: string; version?: string; startedAt?: string; configPath?: string; exposedOn?: string };
+  | {
+    state: 'running';
+    url: string;
+    version?: string;
+    startedAt?: string;
+    configPath?: string;
+    exposedOn?: string;
+    /**
+     * Each agent the daemon serves, with the provider and model it reports
+     * for it. Under serve a soul's provider pin outranks the daemon's
+     * environment, so this can differ from what a `stratus run` here would
+     * use. Absent for a daemon that does not list its agents.
+     */
+    agents?: DaemonAgent[];
+  };
+
+/** One agent a running daemon serves; `provider` is absent when it did not say. */
+export interface DaemonAgent {
+  id: string;
+  name: string;
+  default: boolean;
+  provider?: string;
+  model?: string;
+}
 
 /** Long enough for a busy daemon on loopback, short enough that doctor never hangs on a wedged one. */
 const DAEMON_TIMEOUT_MS = 3_000;
@@ -306,6 +329,25 @@ const INTAKE_WARNING_PREFIX = 'intake: ';
  * it serving nobody. Once it serves one the line is history.
  */
 const NO_AGENTS_WARNING_PREFIX = 'no agents yet: ';
+
+/** The agents a daemon's /health lists, keeping only well-formed entries; undefined when it lists none at all. */
+const servedAgents = (raw: unknown): DaemonAgent[] | undefined =>
+  Array.isArray(raw)
+    ? raw.flatMap((entry) => {
+        const { id, name, default: isDefault, runsOn } = (entry ?? {}) as { id?: unknown; name?: unknown; default?: unknown; runsOn?: unknown };
+        if (typeof id !== 'string') {
+          return [];
+        }
+        const { provider, model } = (runsOn ?? {}) as { provider?: unknown; model?: unknown };
+        return [{
+          id,
+          name: typeof name === 'string' ? name : id,
+          default: isDefault === true,
+          ...(typeof provider === 'string' ? { provider } : {}),
+          ...(typeof provider === 'string' && typeof model === 'string' ? { model } : {}),
+        }];
+      })
+    : undefined;
 
 /** What a daemon's /health said about each config file at start, keeping only well-formed entries. */
 const startedConfigs = (raw: unknown): Array<{ path: string; sha256: string | null }> =>
@@ -452,6 +494,7 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[], agentsOnDi
   // an IPv6 address; `listen` is given it bare).
   const bound = URL.parse(url)?.hostname;
   const exposedOn = bound !== undefined && !(await bindsLoopback(bound.replace(/^\[(.*)\]$/, '$1'))) ? bound : undefined;
+  const agents = servedAgents(health.agents);
   return {
     state: 'running',
     url,
@@ -459,6 +502,7 @@ const inspectDaemon = async (env: CliEnvironment, problems: string[], agentsOnDi
     ...(typeof health.version === 'string' ? { version: health.version } : {}),
     ...(typeof health.startedAt === 'string' ? { startedAt: health.startedAt } : {}),
     ...(configPath !== undefined ? { configPath } : {}),
+    ...(agents !== undefined ? { agents } : {}),
   };
 };
 
@@ -1254,6 +1298,27 @@ export const runDoctor = async (
     }
     if (daemon.exposedOn !== undefined) {
       writeLine(streams.stdout, `  ${''.padEnd(10)}API on ${daemon.exposedOn}: other machines can reach it unless a firewall or port mapping stops them`);
+    }
+    if (daemon.agents !== undefined) {
+      // As the daemon resolves them, pins applied: the top section is what
+      // a `stratus run` from this shell would use, which can differ.
+      const describe = (agent: DaemonAgent): string => {
+        const who = `${agent.name} (${agent.id}${agent.default ? ', default' : ''})`;
+        if (agent.provider === undefined) {
+          return `${who}: the daemon did not say which provider`;
+        }
+        if (agent.provider === 'demo') {
+          return `${who} on demo (offline)`;
+        }
+        if (agent.provider === 'none') {
+          return `${who} with no provider: run \`stratus setup\``;
+        }
+        return `${who} on ${agent.provider}${agent.model !== undefined ? ` · ${agent.model}` : ''}`;
+      };
+      const lines = daemon.agents.length === 0 ? ['none'] : daemon.agents.map(describe);
+      lines.forEach((line, index) => {
+        writeLine(streams.stdout, `  ${(index === 0 ? 'agents' : '').padEnd(10)}${line}`);
+      });
     }
   }
 

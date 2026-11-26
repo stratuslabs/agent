@@ -5933,7 +5933,7 @@ test('doctor reports the resolved provider and where it came from', async () => 
 // part a reading of the files cannot see.
 const doctorAgainstDaemon = async (
   daemon: 'none' | 'unreachable' | ((configPath: string, configSha: string) => Record<string, unknown>),
-  options: { gatewayInfo?: string; processEnv?: Record<string, string> } = {},
+  options: { gatewayInfo?: string; processEnv?: Record<string, string>; argv?: string[] } = {},
 ) => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-home-'));
   await mkdir(path.join(home, '.stratus', 'agents'), { recursive: true });
@@ -5961,7 +5961,7 @@ const doctorAgainstDaemon = async (
   }) as typeof fetch;
   const { streams, output } = createStreams();
   const exitCode = await runCli({
-    argv: ['doctor'],
+    argv: options.argv ?? ['doctor'],
     streams,
     env: { cwd: await mkdtemp(path.join(os.tmpdir(), 'stratus-cwd-')), homeDir: home, processEnv: options.processEnv ?? {}, fetch: fetchImpl },
   });
@@ -5999,6 +5999,53 @@ test('doctor with a daemon that started clean on the config on disk finds no pro
   assert.deepEqual(calls, ['http://127.0.0.1:9/api/v1/health']);
   assert.match(output.stdout, /daemon {4}running 9\.9\.9, started 2026-10-12T08:00:00\.000Z/);
   assert.match(output.stdout, /No problems found\./);
+});
+
+test('doctor lists each agent the running daemon serves, with the provider and model it reports', async () => {
+  // Under serve a soul's provider pin outranks STRATUS_PROVIDER, so the top
+  // section (what `stratus run` here would use) can differ from what the
+  // daemon's agents run on. Only the daemon can say.
+  const agents = [
+    { id: 'ava', name: 'Ava', default: true, builtIn: false, runsOn: { provider: 'anthropic', model: 'claude-opus-5' } },
+    { id: 'bo', name: 'Bo', default: false, builtIn: false, runsOn: { provider: 'openai', model: 'gpt-5' } },
+    { id: 'dee', name: 'Dee', default: false, builtIn: false, runsOn: { provider: 'demo' } },
+    { id: 'cy', name: 'Cy', default: false, builtIn: false },
+  ];
+  const { exitCode, output } = await doctorAgainstDaemon((configPath, sha256) => ({
+    agents,
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
+  }));
+  assert.equal(exitCode, 0, output.stdout);
+  const daemonSection = output.stdout.slice(output.stdout.indexOf('\nDaemon\n'));
+  assert.match(daemonSection, /^ {2}agents {4}Ava \(ava, default\) on anthropic · claude-opus-5$/m);
+  assert.match(daemonSection, /^ {12}Bo \(bo\) on openai · gpt-5$/m);
+  assert.match(daemonSection, /^ {12}Dee \(dee\) on demo \(offline\)$/m);
+  assert.match(daemonSection, /^ {12}Cy \(cy\): the daemon did not say which provider$/m);
+
+  const json = await doctorAgainstDaemon((configPath, sha256) => ({
+    agents,
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
+  }), { argv: ['doctor', '--format', 'json'] });
+  const report = JSON.parse(json.output.stdout) as { daemon: { agents?: unknown } };
+  assert.deepEqual(report.daemon.agents, [
+    { id: 'ava', name: 'Ava', default: true, provider: 'anthropic', model: 'claude-opus-5' },
+    { id: 'bo', name: 'Bo', default: false, provider: 'openai', model: 'gpt-5' },
+    { id: 'dee', name: 'Dee', default: false, provider: 'demo' },
+    { id: 'cy', name: 'Cy', default: false },
+  ]);
+});
+
+test('doctor says a running daemon serves no agents, and prints no agents line for one that does not report them', async () => {
+  const none = await doctorAgainstDaemon((configPath, sha256) => ({
+    agents: [],
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
+  }));
+  assert.match(none.output.stdout.slice(none.output.stdout.indexOf('\nDaemon\n')), /^ {2}agents {4}none$/m);
+  // A daemon from before /health listed its agents.
+  const old = await doctorAgainstDaemon((configPath, sha256) => ({
+    startup: { warnings: [], configs: [{ path: configPath, sha256 }] },
+  }));
+  assert.doesNotMatch(old.output.stdout.slice(old.output.stdout.indexOf('\nDaemon\n')), /^ {2}agents /m);
 });
 
 test('doctor with no daemon running says so, and does not call it a problem', async () => {
