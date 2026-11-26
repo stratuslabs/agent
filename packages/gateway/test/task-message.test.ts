@@ -23,6 +23,7 @@ import type { OptionalModuleHost } from '@stratusagent/plugins';
 import { fleetDbIn } from '@stratusagent/state';
 
 import { createBackgroundTasks } from '../src/background-tasks.ts';
+import { MERGED_TEXT_BUDGET_CHARS } from '../src/merge-batch.ts';
 import { createGateway } from '../src/index.ts';
 import { ShardedSessionStore } from '../src/sessions.ts';
 import { taskOutcomeKey } from '../src/task-settle.ts';
@@ -560,6 +561,34 @@ test('a repeat of a call after its task ended says it ended, not that it was pas
     f.finish();
     await f.settled();
     assert.deepEqual(await send(), { kind: 'ended', status: 'completed' });
+  } finally {
+    await f.close();
+  }
+});
+
+test('one step takes at most a merged message\'s worth of follow-ups, and the rest wait for the next', async () => {
+  const f = await hostFixture();
+  try {
+    const send = (text: string) => f.tasks.toolsHost!.message({ taskId: f.task, agentId: 'ava', originSessionId: f.origin, text, trust: 'agent' });
+    for (const letter of ['a', 'b', 'c']) {
+      await send(letter.repeat(15_000));
+    }
+    const first = await f.steer();
+    assert.ok(first);
+    assert.ok(first.userMessage.length <= MERGED_TEXT_BUDGET_CHARS, `${first.userMessage.length} chars`);
+    assert.deepEqual([first.userMessage.includes('a'.repeat(15_000)), first.userMessage.includes('b'.repeat(15_000)), first.userMessage.includes('c'.repeat(100))], [true, true, false]);
+    const second = await f.steer();
+    assert.ok(second?.userMessage.includes('c'.repeat(15_000)), 'the rest at the next step');
+    // One longer than the budget on its own still goes, alone.
+    await send('d'.repeat(MERGED_TEXT_BUDGET_CHARS + 10));
+    await send('e');
+    const alone = await f.steer();
+    assert.ok(alone?.userMessage.includes('d'.repeat(MERGED_TEXT_BUDGET_CHARS + 10)));
+    assert.equal(alone?.userMessage.includes('\ne'), false);
+    assert.match((await f.steer())?.userMessage ?? '', /\ne$/);
+    f.finish();
+    await f.settled();
+    assert.doesNotMatch(await f.notice(), /never reached it/);
   } finally {
     await f.close();
   }

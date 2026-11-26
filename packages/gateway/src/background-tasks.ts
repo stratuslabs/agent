@@ -22,7 +22,7 @@ import {
 } from '@stratusagent/agents';
 
 import type { TaskApprovalWait } from './approvals.ts';
-import { MERGED_SEPARATOR } from './merge-batch.ts';
+import { MERGED_SEPARATOR, MERGED_TEXT_BUDGET_CHARS } from './merge-batch.ts';
 import type { ShardedSessionStore } from './sessions.ts';
 import {
   createTaskSettler,
@@ -279,19 +279,34 @@ export const createBackgroundTasks = ({
   const followUps = new Map<string, FollowUps>();
 
   /**
-   * A worker turn's steer hook: every follow-up queued for its task, as one
-   * steered message labeled with the least trusted sender's label. No
-   * dispatch keys go with it: a worker's turn stays unkeyed, which is what
-   * keeps a restart from ever continuing it. Nothing is taken into a turn
-   * already stopping, or while the gateway stops.
+   * A worker turn's steer hook: the follow-ups queued for its task, oldest
+   * first, as one steered message labeled with the least trusted sender's
+   * label. At most a merged message's worth (`MERGED_TEXT_BUDGET_CHARS`),
+   * for the reason a merged batch is held to it: overflow recovery can't
+   * trim the newest message. The rest wait for the next step, and one
+   * longer than that on its own goes alone. No dispatch keys go with it: a
+   * worker's turn stays unkeyed, which is what keeps a restart from ever
+   * continuing it. Nothing is taken into a turn already stopping, or while
+   * the gateway stops.
    */
   const steerFor = (taskId: string) => async (turnSignal: AbortSignal): Promise<SteeredMessage | undefined> => {
     const entry = followUps.get(taskId);
     if (entry === undefined || !entry.open || entry.queued.length === 0 || turnSignal.aborted || isStopping()) {
       return undefined;
     }
-    const taken = entry.queued.splice(0);
-    const userMessage = taken.map((followUp) => `${TASK_FOLLOW_UP_HEADER}\n${followUp.text}`).join(MERGED_SEPARATOR);
+    const parts: string[] = [];
+    let chars = 0;
+    for (const followUp of entry.queued) {
+      const part = `${TASK_FOLLOW_UP_HEADER}\n${followUp.text}`;
+      const size = (parts.length > 0 ? MERGED_SEPARATOR.length : 0) + part.length;
+      if (parts.length > 0 && chars + size > MERGED_TEXT_BUDGET_CHARS) {
+        break;
+      }
+      parts.push(part);
+      chars += size;
+    }
+    const taken = entry.queued.splice(0, parts.length);
+    const userMessage = parts.join(MERGED_SEPARATOR);
     // Unread until the transcript shows it: see `unreadOf`.
     entry.handed.push({ message: userMessage, followUps: taken });
     log(`task ${taskId}: ${taken.length} follow-up(s) handed to its worker at its next step`);
