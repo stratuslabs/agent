@@ -325,6 +325,73 @@ Codex, and plugin providers take no effort setting; the log says so. Any
 other value is refused when the soul is read. Like any soul edit, a change
 reaches conversations already under way on their next turn.
 
+## Front
+
+A `front:` block in a soul gives the agent a conversation side: the turns a
+person is waiting on run on a fast model with a few quick tools, and longer
+work goes to a [background task](../reference/config.md#background-tasks) on
+the agent itself, which runs on the agent's own model and tools.
+
+```markdown
+---
+name: Ava
+model: claude-opus-5-5
+tools: ["*"]
+front:
+  model: claude-haiku-5-5
+  # provider: anthropic       optional; the agent's own when omitted
+  # tools: [fs.read, ...]     optional; replaces the quick set below
+---
+```
+
+- **Which turns.** A message on a channel (Slack, Discord, iMessage),
+  `stratus chat`, the dashboard and the control API's session routes, and a
+  background task's outcome notice run as the front. Schedule and trigger
+  firings, background task workers, delegations and sub-agents run on the
+  agent's own model and tools, as they would without the block.
+- **Which tools.** Always `agent.delegate`, `agent.tasks`,
+  `agent.cancelTask` and `agent.messageTask`, plus a quick set:
+  `memory.recall`, `memory.remember`, `message.read`, `message.send`,
+  `fs.read`, `fs.list` and `fs.search`. `front.tools` replaces the quick set.
+  Nothing else, not even the `credential.request` every other turn holds (a
+  task asks for a key instead). Neither list ever grants a tool the soul's
+  own `tools:` does not, and with no
+  `tools:` the front gets only the safe ones of its set, as any turn would.
+  `skill.read` follows `skills:` as it does on every turn. No writes, shell or
+  web by default: add one to `front.tools` and the front waits on it.
+- **A small budget.** A front turn stops after 8 tool steps, or the agent's
+  own limit when that is lower, and wraps up with what it has instead of
+  continuing.
+- **When the front model fails** (an outage, a rate limit), that call is
+  answered by the agent's own model, and the next call tries the front again.
+  `stratus serve` logs `<id>: the front model failed (<error name>); this
+  call answers on the agent's own model`, without the provider's message,
+  which can quote the conversation.
+- **Same agent.** One name, one memory, one set of credentials and one Slack
+  app. The front is told in its prompt that it is the conversation side and
+  to hand longer work to a background task, so the soul does not have to say
+  it. `effort:` applies to the front's model too.
+
+Put the front on an API runtime where you can: the Anthropic API with a
+key, or an OpenAI-compatible service. A Claude subscription runs through the
+Claude Code runtime, and `codex` through the Codex one, and both run every
+call through a CLI subprocess, so each quick reply waits on one starting.
+`front.provider` chooses another *provider* than the agent's own, for
+example the work on `codex` and the front on `anthropic`. It doesn't choose
+a sign-in: a front and a model on the same provider use the agent's one
+sign-in for it, so an agent signed in with a Claude subscription and no API
+key runs an `anthropic` front on Claude Code too.
+
+The model is always named: there is no hidden default, and
+`claude-haiku-5-5` is the suggested one. `stratus agents` and the control
+API's `GET /agents` show it. A `front.provider` or `front.model` that cannot
+be resolved (a provider with no credential) fails the turn with the reason
+rather than quietly answering on the agent's own model.
+
+A build from before `front:` refuses a soul that has one, as it refuses any
+key it does not know, so remove the block before going back to an older
+version. Deleting the block turns the front off; nothing else is left behind.
+
 ## Deleting an agent
 
 The dashboard's Delete agent (agent settings), or `DELETE /api/v1/agents/:id`

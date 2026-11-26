@@ -8,7 +8,11 @@
 // `SMOKE_RESULT <json>`, which the runner parses. Anything else (a
 // scheduled firing's prompt, say) is answered `SMOKE_TEXT <prompt>`. A
 // message that starts `SMOKE_WAIT <ms>` is answered that much later (at
-// most 10 seconds), so a check can see the turn still running.
+// most 10 seconds), so a check can see the turn still running. A message
+// that holds `SMOKE_WHO` and names no tool is answered with what this call
+// was given: `SMOKE_WHO model=<model> front=<yes|no> tools=<names>`, the
+// model the provider was built for, whether the turn ran as the agent's
+// front, and the tools it was offered, sorted.
 //
 // `smoke.credential` reports whether the named credential `smoke.token`
 // reached it through the agent's allowlist, as a SHA-256 of the value so
@@ -18,6 +22,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const CREDENTIAL = 'smoke.token';
 const WAIT = /^SMOKE_WAIT (\d+)\b/;
+const WHO = 'SMOKE_WHO';
 
 const lastUserText = (session) => {
   const message = [...session.messages].reverse().find((entry) => entry.role === 'user');
@@ -59,10 +64,11 @@ export const createPlugin = () => ({
     context.providers.register({
       name: 'smoke',
       streams: false,
-      create() {
+      create(selection) {
+        const model = selection?.model ?? 'none';
         return {
           name: 'smoke',
-          async generate({ session, signal }) {
+          async generate({ session, signal, tools, runtime }) {
             const last = session.messages.at(-1);
             if (last?.role === 'tool') {
               const result = last.toolResult;
@@ -82,6 +88,10 @@ export const createPlugin = () => ({
               await sleep(Math.min(Number(wait[1]), 10_000), undefined, { signal });
             }
             const call = scriptedCall(text);
+            if (!call && text.includes(WHO)) {
+              const names = (tools ?? []).map((tool) => tool.name).sort().join(',');
+              return { parts: [{ type: 'text', text: `${WHO} model=${model} front=${runtime?.front === true ? 'yes' : 'no'} tools=${names}` }] };
+            }
             if (!call) {
               return { parts: [{ type: 'text', text: `SMOKE_TEXT ${text.slice(0, 200)}` }] };
             }

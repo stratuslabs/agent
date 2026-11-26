@@ -23,6 +23,11 @@ export {
   isDelegateAllowed,
   type ParsedSoul,
   type ParseSoulOptions,
+  type SoulFront,
+  FRONT_TASK_TOOLS,
+  DEFAULT_FRONT_TOOLS,
+  FRONT_MAX_STEPS,
+  frontToolEntries,
   parseSoul,
   formatSoul,
 } from './soul.ts';
@@ -121,8 +126,11 @@ export {
 export {
   TASKS_TOOL_NAME,
   CANCEL_TASK_TOOL_NAME,
+  MESSAGE_TASK_TOOL_NAME,
   createTaskTools,
   type TaskCancelAnswer,
+  type TaskMessageAnswer,
+  type TaskMessageInput,
   type TaskSummary,
   type TaskToolsHost,
 } from './tools/tasks.ts';

@@ -398,6 +398,26 @@ export const matchesToolAllowlist = (toolName: string, allowlist: readonly strin
   matchesGlobbedAllowlist(toolName, allowlist, '.*');
 
 /**
+ * Whether an agent's `tools:` list lets it call `name`, before any tool a
+ * host grants every agent. An omitted list is the tools registered at risk
+ * `safe` (or every tool where the host passes `unlistedTools: 'every'`); a
+ * name nothing registered passes, so the call is refused as not found. The
+ * runner's gate and a host narrowing a turn's tools (a soul's `front:`)
+ * both read the list through here, so the two can't disagree.
+ */
+export const toolListAllows = (
+  name: string,
+  allowlist: readonly string[] | undefined,
+  registered: Pick<Tool, 'risk'> | undefined,
+  unlistedTools: UnlistedTools | undefined,
+): boolean => {
+  if (allowlist === undefined) {
+    return unlistedTools === 'every' || registered === undefined || resolveToolRisk(registered) === 'safe';
+  }
+  return matchesToolAllowlist(name, allowlist);
+};
+
+/**
  * Whether an allowlist entry and a declared namespace select any of the
  * same tools — true when either sits under the other.
  *
@@ -745,6 +765,15 @@ export const DEFAULT_SUBPROCESS_PASS_ENV: readonly string[] = ['PATH', 'HOME', '
  */
 export interface ExecutionContext {
   signal?: AbortSignal;
+  /**
+   * The id of the call being run (`ToolCall.id`), as the transcript records
+   * it, set by the runner on the kernel loop and on a hosted call alike. A
+   * tool whose effect must happen once per call, however often a host asks
+   * it to run that call, keys on it. Providers may reuse an id across
+   * responses, so a key should pair it with the assistant message that
+   * carries the call. Absent when a host runs a tool without the runner.
+   */
+  callId?: string;
   /**
    * Label this one call's output — the per-call half of the producer
    * channel, for a tool whose output is only sometimes external: an

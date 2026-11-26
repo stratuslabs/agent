@@ -5,8 +5,9 @@
 # account, the state directory is that account's and private, no capability
 # or new privilege, the filesystem read-only outside the state directory,
 # /home hidden and /tmp private, JSON logs in the journal, state kept across
-# a restart, a clean stop inside TimeoutStopSec, and a shell command running
-# in the shell tool's sandbox (bubblewrap) under the unit's settings.
+# a restart, a clean stop inside TimeoutStopSec, a shell command running
+# in the shell tool's sandbox (bubblewrap) under the unit's settings, one
+# background task, and an agent with a front: block on its front model.
 #
 #   deploy/systemd/smoke.sh    # from the repository root, after `pnpm build`
 #
@@ -200,10 +201,31 @@ tools:
 
 Background task smoke agent. Its provider is a script, not a model.
 SOUL
+sudo -u stratus tee "$STATE/.stratus/agents/front-smoke.md" >/dev/null <<'SOUL'
+---
+name: Front Smoke
+provider: smoke
+model: smoke-main
+tools:
+  - agent.delegate
+  - agent.tasks
+  - smoke.credential
+front:
+  model: smoke-front
+---
+
+Front agent smoke agent. Its provider is a script, not a model.
+SOUL
 sudo systemctl restart "$UNIT"
 wait_healthy
 SMOKE_TOKEN="$TOKEN" node "$ROOT/scripts/release-smoke/background-task.mjs" "$API" smoke \
   || fail "the background task check failed"
+
+echo "--- an agent with a front answers on its front model"
+# The same daemon's second agent: its conversation turns on smoke-front, its
+# task on smoke-main. scripts/release-smoke/front-agent.mjs says what has to hold.
+SMOKE_TOKEN="$TOKEN" node "$ROOT/scripts/release-smoke/front-agent.mjs" "$API" front-smoke \
+  || fail "the front agent check failed"
 
 echo "--- a clean stop inside TimeoutStopSec"
 started=$SECONDS

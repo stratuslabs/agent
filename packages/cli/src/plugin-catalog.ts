@@ -81,4 +81,5 @@ export const KERNEL_TOOL_NAMES = [
   'agent.delegate',
   'agent.tasks',
   'agent.cancelTask',
+  'agent.messageTask',
 ];

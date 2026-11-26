@@ -377,6 +377,18 @@ a task's worker included, can't start a task. Tasks are on unless
   outcome then arrives as cancelled. An agent stops its own with
   `agent.cancelTask`, and the operator any task with `stratus tasks
   cancel <id>`.
+- **Follow-ups.** `agent.messageTask` passes a follow-up into a running
+  task: the conversation that started it sends an edit or an addition,
+  and the task's turn reads it at its next step, the way a message sent
+  during a turn reaches that turn. Only that conversation can send one;
+  another conversation with the same agent gets an error. A task that has
+  ended, or that a stop was asked for, takes nothing and says so. A
+  follow-up the task ended before reading is listed in its outcome notice.
+  A task on Codex doesn't take messages mid-task yet, so every follow-up
+  sent to one is listed there. Follow-ups wait in memory, so a restart
+  loses them along with the task. The tool is `safe`, and is asked about
+  first once the conversation has read outside content, like
+  `agent.delegate`.
 - **Seeing them.** An agent lists its own with `agent.tasks`.
   `stratus tasks` lists the running daemon's tasks: every
   one running or whose outcome isn't in its conversation yet, newest
@@ -395,7 +407,8 @@ a task's worker included, can't start a task. Tasks are on unless
   waiting on an approval, in the daemon log and on the control API's event
   stream, with ids only.
 - **Off.** `enabled: false` refuses `background: true` with an error
-  saying so, and agents no longer get `agent.tasks` or `agent.cancelTask`.
+  saying so, and agents no longer get `agent.tasks`, `agent.cancelTask` or
+  `agent.messageTask`.
   Tasks a previous run left are still settled at startup, and `stratus
   tasks` still lists them.
 

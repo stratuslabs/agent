@@ -286,6 +286,20 @@ test('the notice says how the task ended, built from the row and the outcome alo
   assert.match(taskNoticeText(row, { status: 'interrupted', steps: 4, why: 'lost-in-restore' }), /result was lost in a restore, and it was not run again\.\]$/);
 });
 
+test('unread follow-ups share one 16 KB budget in the notice, however many there are', () => {
+  const row = { id: 't_1', workerAgentId: 'atlas', workerSessionId: 'w' };
+  assert.equal(
+    taskNoticeText(row, { status: 'completed', steps: 1, reply: 'Done.' }, ['rename it', 'add the chart']),
+    '[Background task t_1 (atlas) completed after 1 step.\nResult: Done.\n2 follow-ups sent with agent.messageTask never reached it, because it ended first:\n- rename it\n- add the chart]',
+  );
+  const many = Array.from({ length: 40 }, (_, index) => `${index} ${'x'.repeat(4_000)}`);
+  const text = taskNoticeText(row, { status: 'completed', steps: 1, reply: 'Done.' }, many);
+  const section = text.slice(text.indexOf('never reached it'));
+  assert.ok(Buffer.byteLength(section) < TASK_RESULT_LIMIT_BYTES + 200, `the unread section is ${Buffer.byteLength(section)} bytes`);
+  assert.match(text, /\n- 0 x+/, 'the earliest come first');
+  assert.match(text, /\(Cut at 16 KB of 157 KB\.\)\]$/);
+});
+
 test('a result past 16 KB is cut on a character boundary and says so', () => {
   const row = { id: 't_1', workerAgentId: 'atlas', workerSessionId: 'w' };
   const long = 'é'.repeat(TASK_RESULT_LIMIT_BYTES);

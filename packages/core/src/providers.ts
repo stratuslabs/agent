@@ -257,6 +257,13 @@ export interface AgentRuntimeContext {
    * this existed, or a channel that grew since, is described as it is now.
    */
   conversation?: ConversationContext;
+  /**
+   * True on a turn that runs as the agent's conversation side (a soul's
+   * `front:`): a fast model with a few quick tools, whose job is to answer
+   * within seconds and hand anything longer to a background task. The
+   * runtime section tells the agent so, so no soul has to carry it.
+   */
+  front?: boolean;
 }
 
 /**

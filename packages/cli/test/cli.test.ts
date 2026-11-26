@@ -477,6 +477,19 @@ test('runCli agents lists souls, the stratus soul among them, and memory counts'
   assert.deepEqual(stratus.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
 });
 
+test('stratus agents shows the model a soul\'s front: answers conversation turns on', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'stratus-agents-front-'));
+  const agentsDir = path.join(home, '.stratus', 'agents');
+  await mkdir(agentsDir, { recursive: true });
+  await writeFile(path.join(agentsDir, 'ava.md'), '---\nname: Ava\nid: ava\nprovider: anthropic\nmodel: claude-opus-5\nfront:\n  model: claude-haiku-5-5\n---\n\nYou are Ava.\n');
+  await writeFile(path.join(agentsDir, 'rex.md'), '---\nname: Rex\nid: rex\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nYou are Rex.\n');
+  const out = createStreams();
+  assert.equal(await runCli({ argv: ['agents'], streams: out.streams, env: { cwd: home, homeDir: home, processEnv: {} } }), 0);
+  assert.match(out.output.stdout, /Ava\n[\s\S]*?runs on {3}anthropic · claude-opus-5\n {4}front {5}claude-haiku-5-5, for conversation turns\n/);
+  // Only the soul with a front gets the line.
+  assert.equal(out.output.stdout.match(/front {5}/g)?.length, 1);
+});
+
 test('runCli agents resolves model-only soul pins and survives a bad config dir', async () => {
   const home = await agentHome('stratus-home-');
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'stratus-cli-'));

@@ -441,7 +441,9 @@ export const createDispatch = ({
       const running = joint !== undefined ? { ...turnInput, signal: joint.signal } : turnInput;
       let outcome: { session: Session } | { error: unknown };
       try {
-        outcome = { session: await dispatchInternal(running, absorbedKeys, undefined, steer) };
+        // The public door carries a person's message (a channel, `stratus
+        // chat`, the control API), so its turns are conversation turns.
+        outcome = { session: await dispatchInternal(running, absorbedKeys, undefined, steer, true) };
       } catch (error) {
         outcome = { error };
       }

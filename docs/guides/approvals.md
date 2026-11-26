@@ -292,12 +292,12 @@ A tool that declares no risk counts as `gated`, never `safe` — forgetting
 to classify something should cost a prompt, not an unattended command. Most
 built-in tools (`demo.echo`, which only an agent on the demo provider is
 given, `memory.remember`, `memory.recall`,
-`memory.forget`, `agent.delegate`, `credential.request`, `schedule.list`,
-`schedule.cancel`) are `safe`; the built-in exceptions are `schedule.every`,
+`memory.forget`, `agent.delegate`, `agent.messageTask`, `credential.request`,
+`schedule.list`, `schedule.cancel`) are `safe`; the built-in exceptions are `schedule.every`,
 `schedule.at`, `schedule.on` and `message.send`, which are `gated` because
 they act past the end of the turn — see [Schedules](./schedules.md).
-`agent.delegate` and `credential.request` are `gated` too once the
-conversation has read external content; see
+`agent.delegate`, `agent.messageTask` and `credential.request` are `gated`
+too once the conversation has read external content; see
 [After an agent reads the web](#after-an-agent-reads-the-web). Anything you install is where this
 starts to bite, which is what [Tools](./tools.md) is about.
 
@@ -959,9 +959,10 @@ and a schedule's pre-authorized destination — a schedule that reads the web
 and reports to the channel you approved it for is the job it was approved
 to do, and the page can only change the words it sends there.
 
-Two `safe` tools change with the label itself, whatever `externalContent`
-says: `agent.delegate` and `credential.request`. Once a conversation has
-read external content, each call to them is judged as a `gated` call, so
+Three `safe` tools change with the label itself, whatever `externalContent`
+says: `agent.delegate`, `agent.messageTask` and `credential.request`. Once a
+conversation has read external content, each call to them is judged as a
+`gated` call, so
 your posture, your grants and this gate decide it exactly as they would
 `message.send`.
 
@@ -970,6 +971,10 @@ your posture, your grants and this gate decide it exactly as they would
   `headless` with `guarded`, it is refused; with `open`, it runs unless
   `externalContent` is `gate`. The teammate's own conversation starts at
   the same label, so the rule holds down a chain.
+- **`agent.messageTask`.** A follow-up steers a background task that is
+  already running, with that task's tools, so a page must not be able to
+  write one. The follow-up also carries the conversation's label into the
+  task's turn, as any message sent during a turn does.
 - **`credential.request`.** A page can tell an agent to ask a person for a
   key, with an `env` its shell could then read, and the form shows the
   agent's reason, not the page behind it. So the request is judged before
@@ -980,8 +985,8 @@ your posture, your grants and this gate decide it exactly as they would
   `externalContent` is `gate`; that setting is the only thing that changes
   it there.
 
-In a conversation that hasn't read anything from outside, both run without
-a check, as before.
+In a conversation that hasn't read anything from outside, all three run
+without a check, as before.
 
 Three limits to know before relying on it:
 
