@@ -46,6 +46,7 @@ import {
   resolveRuntimeConfig,
   warnOnCredentialOverride,
   warnOnUntrustedConfig,
+  warnOnSkippedConfig,
   runSingleLoop,
   printSessionSummary,
   formatRuntimeBanner,
@@ -297,6 +298,7 @@ export const runCli = async ({ argv, streams: given = process, env = {} }: CliRu
       return await runServe(command, streams, resolvedEnv);
     }
 
+    await warnOnSkippedConfig(command, resolvedEnv, streams);
     const runtime = await resolveRuntimeConfig(command, resolvedEnv);
     warnOnUntrustedConfig(runtime, streams);
     await warnOnCredentialOverride(runtime, streams, resolvedEnv);

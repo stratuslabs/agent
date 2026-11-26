@@ -254,7 +254,8 @@ import {
   PROVIDER_STATE_METADATA_KEYS,
   ConfigFileError,
   loadConfigFile,
-  resolveConfigLocation,
+  discoverConfigLocation,
+  type SkippedConfigFile,
   resolveConfiguredSoul,
   resolveRuntimeConfig,
   runsOnHarness,
@@ -760,6 +761,35 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
   // The last successfully loaded config snapshot, serving dispatches while
   // the file on disk is temporarily broken (an operator mid-edit).
   let lastGoodConfigSnapshot: NonNullable<RuntimeSelection['presetConfig']> | undefined;
+  // The last project config discovery passed over, said once per new
+  // reason rather than on every dispatch.
+  let lastSkippedConfig: string | undefined;
+  /**
+   * The config a dispatch resolves from, read once. A project config in the
+   * daemon's folder that won't load is skipped for the global one, so a
+   * broken untrusted file is never the reason nothing dispatches. One the
+   * daemon was running on is an operator mid-edit, though: that throws the
+   * ConfigFileError the last-known-good paths handle, so neither the
+   * runtime nor the default agent moves to another file's settings. Each
+   * caller resolves from the snapshot this returns rather than discovering
+   * again, which a save landing in between could send to a different file.
+   */
+  const dispatchConfigSnapshot = async (): Promise<{
+    snapshot: NonNullable<RuntimeSelection['presetConfig']>;
+    skipped?: SkippedConfigFile;
+  }> => {
+    const { location, skipped } = await discoverConfigLocation(
+      options.selection?.configPath ? { configPath: options.selection.configPath } : {},
+      env,
+    );
+    if (skipped !== undefined && lastGoodConfigSnapshot?.path === skipped.path) {
+      throw new ConfigFileError(skipped.path, new Error(skipped.reason));
+    }
+    const snapshot = location
+      ? { config: await loadConfigFile(location.path), trusted: location.trusted, path: location.path }
+      : { config: {}, trusted: true };
+    return skipped !== undefined ? { snapshot, skipped } : { snapshot };
+  };
   /**
    * Read from the home once, on first use, which is after the migrations
    * `serve` runs before it starts the gateway. It changes only when 0005
@@ -792,7 +822,8 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // happens at dispatch, where pin demotion applies.
     let resolved: { soul: ParsedSoul; path: string } | undefined;
     try {
-      resolved = await resolveConfiguredSoul({ ...options.selection }, env);
+      const { snapshot } = await dispatchConfigSnapshot();
+      resolved = await resolveConfiguredSoul({ ...options.selection, presetConfig: snapshot }, env);
     } catch (error) {
       warn(`could not load the configured default soul: ${error instanceof Error ? error.message : String(error)}`);
       // A transiently unreadable default keeps routing to the last known
@@ -2234,15 +2265,18 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
     // in a real conversation. With no known-good snapshot to fall back
     // on, failing is the honest outcome. Credential and provider errors
     // are never masked — only the file itself degrades.
+    // A project config that won't load: see dispatchConfigSnapshot.
     let configSnapshot: NonNullable<RuntimeSelection['presetConfig']>;
     try {
-      const location = await resolveConfigLocation(
-        options.selection?.configPath ? { configPath: options.selection.configPath } : {},
-        env,
-      );
-      configSnapshot = location
-        ? { config: await loadConfigFile(location.path), trusted: location.trusted, path: location.path }
-        : { config: {}, trusted: true };
+      const { snapshot, skipped } = await dispatchConfigSnapshot();
+      const skippedLine = skipped === undefined
+        ? undefined
+        : `ignoring ${skipped.path}, which can't be used (${skipped.reason}); serving on ${snapshot.path ?? 'built-in defaults'}`;
+      if (skippedLine !== undefined && skippedLine !== lastSkippedConfig) {
+        warn(skippedLine);
+      }
+      lastSkippedConfig = skippedLine;
+      configSnapshot = snapshot;
       lastGoodConfigSnapshot = configSnapshot;
     } catch (error) {
       if (!(error instanceof ConfigFileError) || !lastGoodConfigSnapshot) {

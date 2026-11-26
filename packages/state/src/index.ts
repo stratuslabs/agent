@@ -291,6 +291,9 @@ export {
 
 export {
   type ResolvedConfigLocation,
+  type ConfigDiscovery,
+  type SkippedConfigFile,
+  discoverConfigLocation,
   resolveConfigLocation,
   discoverActiveConfig,
   type TrustedConfigBlock,
