@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the image and prove it serves: a seeded control API token, a held
-# start and its promotion, a pause that survives a container restart, and
-# one background task run start to finish on a stand-in provider.
+# start and its promotion, a pause that survives a container restart, one
+# background task run start to finish on a stand-in provider, and an agent
+# with a front: block answering on its front model.
 #
 #   deploy/docker/smoke.sh            # from the repository root
 #
@@ -127,6 +128,21 @@ tools:
 
 Background task smoke agent. Its provider is a script, not a model.
 SOUL
+docker exec -i "$NAME" sh -c 'cat > ~/.stratus/agents/front-smoke.md' <<'SOUL'
+---
+name: Front Smoke
+provider: smoke
+model: smoke-main
+tools:
+  - agent.delegate
+  - agent.tasks
+  - smoke.credential
+front:
+  model: smoke-front
+---
+
+Front agent smoke agent. Its provider is a script, not a model.
+SOUL
 printf '{"plugins":{"stratus-plugin-release-smoke":{"enabled":true}}}\n' \
   | docker exec -i "$NAME" sh -c 'umask 077 && cat > ~/.stratus/config.json'
 docker restart "$NAME" >/dev/null
@@ -135,5 +151,11 @@ find_api
 call POST /promote | grep -q '"held":false' || fail "the promote before the task check did not release the hold"
 docker exec -i -e SMOKE_TOKEN="$TOKEN" "$NAME" node --input-type=module - http://127.0.0.1:4123/api/v1 smoke \
   < scripts/release-smoke/background-task.mjs || fail "the background task check failed"
+
+echo "--- an agent with a front answers on its front model"
+# The same daemon's second agent: its conversation turns on smoke-front, its
+# task on smoke-main. scripts/release-smoke/front-agent.mjs says what has to hold.
+docker exec -i -e SMOKE_TOKEN="$TOKEN" "$NAME" node --input-type=module - http://127.0.0.1:4123/api/v1 front-smoke \
+  < scripts/release-smoke/front-agent.mjs || fail "the front agent check failed"
 
 echo "smoke: ok"

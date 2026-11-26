@@ -55,6 +55,18 @@ once. The Docker and systemd smoke tests in CI run it
 base URL and the agent id as arguments and the operator token from
 `SMOKE_TOKEN`.
 
+## The front check
+
+`front-agent.mjs` drives an agent whose soul has a `front:` block, on the
+same `smoke` provider, which answers a message holding `SMOKE_WHO` with the
+model it was built for, whether the turn ran as the front, and the tools it
+was offered. A message in a conversation must be answered on the front
+model, without the tools the front does not get; the background task it
+starts must run on the agent's own model with its own tools; and the task's
+outcome must be answered in the conversation by the front again. The Docker
+and systemd smoke tests run it right after the background task check, on a
+second agent, `front-smoke`. It takes the same arguments.
+
 ## What it does not cover
 
 - **Slack.** It connects no channel, so it does not prove an agent admits
