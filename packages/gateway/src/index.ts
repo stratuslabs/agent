@@ -232,6 +232,7 @@ import {
   BUILTIN_MEMORY_STORE_NAME,
   BUILTIN_PROVIDER_NAMES,
   createDemoTool,
+  toolsForRuntime,
   createFileCredentialResolver,
   credentialValuesFor,
   resolveDaemonCredential,
@@ -1661,7 +1662,9 @@ export const createGateway = (options: GatewayOptions = {}): Gateway => {
 
     const runner = new AgentRunner({
       provider,
-      tools,
+      // demo.echo only for the demo provider, which is what calls it. The
+      // key above holds the provider, so a demo runner is never shared.
+      tools: toolsForRuntime(tools, config),
       // Runners are built on dispatch, after the plugins loaded and the
       // selection below ran, so a contributed executor is in place for
       // the first turn.

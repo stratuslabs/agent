@@ -71,7 +71,6 @@ name: Blair
 provider: anthropic
 model: claude-opus-5-5
 tools:
-  - demo.echo
   - memory.*
 skills:
   - code-review

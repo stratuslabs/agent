@@ -100,11 +100,11 @@ different:
   that, as the prompt says it should, so such a soul is not one this eval
   can score: its failures are the language, not the answer.
 - **The gateway's own tools are offered inert.** A soul with no `tools:`
-  sees what the gateway registers, in its order: `demo.echo`, the memory
-  tools, the `schedule.*` tools, `message.send`, `credential.request`, and
-  `agent.delegate`. The ones whose effect leaves the turn are the real
-  definitions over backends that refuse, so nothing is scheduled, sent, or
-  delegated.
+  sees what the gateway gives it, in its order: the memory tools, the
+  `schedule.*` tools, `message.send`, `credential.request`, and
+  `agent.delegate`, with `demo.echo` first on the demo provider only. The
+  ones whose effect leaves the turn are the real definitions over backends
+  that refuse, so nothing is scheduled, sent, or delegated.
 - **Plugin tools are not offered.** This runner has no approval policy, so
   a plugin tool would run unattended, `shell.run` included. A soul with
   many plugin tools therefore routes against a shorter list here than in

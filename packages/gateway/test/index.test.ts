@@ -676,7 +676,7 @@ const hangingPolicy = () => ({
 test('a policy that never answers is the turn\'s own time, not a person\'s, and the limit stops it', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\n---\n\nYou are Ava.\n');
-  const fetchImpl = (async () => openAiToolCall('demo_echo', { text: 'hi' })) as typeof fetch;
+  const fetchImpl = (async () => openAiToolCall('memory_recall', { query: 'hi' })) as typeof fetch;
   const asked: string[] = [];
   const gateway = createGateway({
     env: { homeDir: home, cwd: home, processEnv: { OPENAI_API_KEY: 'sk-test' }, fetch: fetchImpl },
@@ -690,7 +690,7 @@ test('a policy that never answers is the turn\'s own time, not a person\'s, and 
       () => gateway.dispatch({ sessionId: 'policy-1', agentId: 'ava', userMessage: 'echo' }),
       (error: Error) => error instanceof RunAbortedError && /time limit of 300ms/.test(error.message),
     );
-    assert.deepEqual(asked, ['demo.echo'], 'the policy was asked, and it is what hung');
+    assert.deepEqual(asked, ['memory.recall'], 'the policy was asked, and it is what hung');
   } finally {
     await gateway.stop();
   }
@@ -3574,7 +3574,7 @@ test('a subscription turn thinking past the idle timeout after a tool is not abo
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
     '---', 'name: Ava', 'provider: anthropic',
-    'tools:', '  - demo.echo', '---', '', 'You are Ava.', '',
+    'tools:', '  - memory.recall', '---', '', 'You are Ava.', '',
   ].join('\n'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
@@ -3595,11 +3595,11 @@ test('a subscription turn thinking past the idle timeout after a tool is not abo
     };
     return (async function* () {
       yield { type: 'system', subtype: 'init', session_id: 'sdk-1' };
-      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.memory_recall?.handler;
       if (!handler) {
         throw new Error('the tool was not bridged');
       }
-      await handler({ text: 'hi' }, {});
+      await handler({ query: 'hi' }, {});
       for (let report = 0; report < REPORTS; report += 1) {
         await new Promise((resolve) => setTimeout(resolve, (IDLE_MS * 2) / REPORTS));
         // A real query stops when its controller fires; without this the
@@ -3640,7 +3640,7 @@ test('a slow approval holds the watchdog even when the policy emits nothing', as
   const home = await newHome();
   await writeSoul(home, 'ava.md', [
     '---', 'name: Ava', 'provider: anthropic',
-    'tools:', '  - demo.echo', '---', '', 'You are Ava.', '',
+    'tools:', '  - memory.recall', '---', '', 'You are Ava.', '',
   ].join('\n'));
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
@@ -3662,11 +3662,11 @@ test('a slow approval holds the watchdog even when the policy emits nothing', as
         session_id: 'sdk-1',
         event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'checking' } },
       };
-      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.demo_echo?.handler;
+      const handler = options.mcpServers?.stratus?.instance?._registeredTools?.memory_recall?.handler;
       if (!handler) {
         throw new Error('the tool was not bridged');
       }
-      await handler({ text: 'hi' }, {});
+      await handler({ query: 'hi' }, {});
       yield { type: 'result', subtype: 'success', is_error: false, result: 'all done', session_id: 'sdk-1' };
     })();
   }) as never;
@@ -3704,7 +3704,7 @@ test('a policy that throws does not leave the next turn without a watchdog', asy
   // is on neither the turn nor the path that caused it.
   const home = await newHome();
   const soul = path.join(home, '.stratus', 'agents', 'ava.md');
-  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
@@ -3715,7 +3715,7 @@ test('a policy that throws does not leave the next turn without a watchdog', asy
   );
 
   const IDLE_MS = 300;
-  const fetchImpl = (async () => openAiToolCall('demo_echo', { text: 'hi' })) as typeof fetch;
+  const fetchImpl = (async () => openAiToolCall('memory_recall', { query: 'hi' })) as typeof fetch;
   const queryFn = ((params: { options?: unknown }) => {
     const signal = (params.options as { abortController?: AbortController }).abortController?.signal;
     return (async function* () {
@@ -3754,7 +3754,7 @@ test('a policy that throws does not leave the next turn without a watchdog', asy
   // The same agent switches to the subscription runtime, which streams —
   // the gateway re-reads the soul per dispatch, so this takes effect on
   // the next turn of the same session.
-  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
 
   const rescue = new AbortController();
   const timer = setTimeout(() => rescue.abort(), 10_000);
@@ -3857,7 +3857,7 @@ test('an approved tool on a turn with no watchdog leaves nothing behind', async 
   // the watchdog for the next turn on that session.
   const home = await newHome();
   const soul = path.join(home, '.stratus', 'agents', 'ava.md');
-  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nprovider: openai\nmodel: model-a\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
   await mkdir(path.join(home, '.stratus'), { recursive: true });
   await writeFile(
     path.join(home, '.stratus', 'credentials.json'),
@@ -3871,7 +3871,7 @@ test('an approved tool on a turn with no watchdog leaves nothing behind', async 
   let openAiCalls = 0;
   const fetchImpl = (async () => {
     openAiCalls += 1;
-    return openAiCalls === 1 ? openAiToolCall('demo_echo', { text: 'hi' }) : openAiText('first done');
+    return openAiCalls === 1 ? openAiToolCall('memory_recall', { query: 'hi' }) : openAiText('first done');
   }) as typeof fetch;
 
   const queryFn = ((params: { options?: unknown }) => {
@@ -3908,7 +3908,7 @@ test('an approved tool on a turn with no watchdog leaves nothing behind', async 
   assert.equal(first.status, 'completed', `first turn failed: ${first.lastError ?? ''}`);
 
   // The same agent moves to the subscription runtime, which streams.
-  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - demo.echo\n---\n\nYou are Ava.\n');
+  await writeFile(soul, '---\nname: Ava\nprovider: anthropic\ntools:\n  - memory.recall\n---\n\nYou are Ava.\n');
 
   const rescue = new AbortController();
   const timer = setTimeout(() => rescue.abort(), 10_000);
@@ -6307,7 +6307,7 @@ test('an agent with its own budget gets it, and the rest keep the shared one', a
         return openAiText('wrapped up');
       }
       toolTurns.set(who, (toolTurns.get(who) ?? 0) + 1);
-      return openAiToolCall('demo.echo', { text: 'again' });
+      return openAiToolCall('memory.recall', { query: 'again' });
     }) as typeof fetch,
   };
   const gateway = createGateway({
@@ -6345,7 +6345,7 @@ test('an agent with auto-continue keeps working past its budget, up to its cap, 
         return openAiText('wrapped up');
       }
       toolTurns.set(who, (toolTurns.get(who) ?? 0) + 1);
-      return openAiToolCall('demo.echo', { text: 'again' });
+      return openAiToolCall('memory.recall', { query: 'again' });
     }) as typeof fetch,
   };
   const gateway = createGateway({
@@ -6388,7 +6388,7 @@ test('an auto-continuing turn wraps up when another message is waiting for its s
         return openAiText('answered');
       }
       toolTurns += 1;
-      return openAiToolCall('demo.echo', { text: 'again' });
+      return openAiToolCall('memory.recall', { query: 'again' });
     }) as typeof fetch,
   };
   const gateway = createGateway({

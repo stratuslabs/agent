@@ -1342,7 +1342,7 @@ test('runCli completes a real-provider tool round trip across two turns', async 
   const requestBodies: Array<{ messages: Array<Record<string, unknown>>; tools?: unknown[] }> = [];
 
   const exitCode = await runCli({
-    argv: ['run', '--prompt', 'shout hello', '--provider', 'openai'],
+    argv: ['run', '--prompt', 'what do you remember about hello?', '--provider', 'openai'],
     streams,
     env: {
       homeDir: tempHome,
@@ -1367,8 +1367,8 @@ test('runCli completes a real-provider tool round trip across two turns', async 
                         id: 'call-1',
                         type: 'function',
                         function: {
-                          name: 'demo_echo',
-                          arguments: JSON.stringify({ text: 'hello' }),
+                          name: 'memory_recall',
+                          arguments: JSON.stringify({ query: 'hello' }),
                         },
                       },
                     ],
@@ -1383,7 +1383,7 @@ test('runCli completes a real-provider tool round trip across two turns', async 
           ok: true,
           status: 200,
           text: async () => JSON.stringify({
-            choices: [{ message: { content: 'The echo tool shouted: HELLO' } }],
+            choices: [{ message: { content: 'Nothing about hello yet.' } }],
           }),
         } as Response;
       },
@@ -1393,21 +1393,21 @@ test('runCli completes a real-provider tool round trip across two turns', async 
   assert.equal(exitCode, 0);
   assert.equal(requestBodies.length, 2);
 
-  const firstTools = requestBodies[0]?.tools as Array<{ function?: { name?: string } }>;
-  assert.equal(firstTools?.[0]?.function?.name, 'demo_echo');
+  const firstTools = (requestBodies[0]?.tools as Array<{ function?: { name?: string } }>).map((tool) => tool.function?.name);
+  assert.ok(firstTools.includes('memory_recall'), firstTools.join(', '));
+  assert.ok(!firstTools.includes('demo_echo'), firstTools.join(', '));
 
   const secondMessages = requestBodies[1]?.messages ?? [];
   const assistantToolCall = secondMessages.find((message) => Array.isArray(message.tool_calls));
   const toolResult = secondMessages.find((message) => message.role === 'tool');
   assert.ok(assistantToolCall, 'second request should replay the assistant tool call');
   const replayedCalls = assistantToolCall?.tool_calls as Array<{ function?: { name?: string } }>;
-  assert.equal(replayedCalls?.[0]?.function?.name, 'demo_echo');
+  assert.equal(replayedCalls?.[0]?.function?.name, 'memory_recall');
   assert.equal(toolResult?.tool_call_id, 'call-1');
-  assert.match(String(toolResult?.content), /HELLO/);
 
-  assert.match(output.stdout, /tool.called demo\.echo/);
-  assert.match(output.stdout, /tool.completed demo\.echo ok=true/);
-  assert.match(output.stdout, /\[assistant\] The echo tool shouted: HELLO/);
+  assert.match(output.stdout, /tool.called memory\.recall/);
+  assert.match(output.stdout, /tool.completed memory\.recall ok=true/);
+  assert.match(output.stdout, /\[assistant\] Nothing about hello yet\./);
   assert.equal(output.stderr, '');
 });
 
@@ -1778,8 +1778,11 @@ test('runCli executes the anthropic provider path with env config', async () => 
 
   assert.equal(exitCode, 0);
   assert.equal(requestBodies[0]?.model, 'claude-opus-5-5');
-  const tools = requestBodies[0]?.tools as Array<{ name?: string }>;
-  assert.equal(tools?.[0]?.name, 'demo_echo');
+  // Tools are offered, and demo.echo is not among them: it is there for
+  // the demo provider, which is the only thing that calls it.
+  const toolNames = (requestBodies[0]?.tools as Array<{ name?: string }>).map((tool) => tool.name);
+  assert.ok(toolNames.includes('memory_recall'), toolNames.join(', '));
+  assert.ok(!toolNames.includes('demo_echo'), toolNames.join(', '));
   assert.match(output.stdout, /Starting Stratus Agent local loop with provider=anthropic model=claude-opus-5-5/);
   assert.match(output.stdout, /\[assistant\] Hello from Claude\./);
   assert.equal(output.stderr, '');

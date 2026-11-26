@@ -2,6 +2,7 @@ import {
   BUILTIN_PROVIDER_NAMES,
   describeEffort,
   resolveEffort,
+  ToolRegistry,
   type AgentModelContext,
   type ContributionRegistry,
   type ProviderContribution,
@@ -36,9 +37,12 @@ import type { StateEnvironment } from './environment.ts';
 import { packageOnDisk } from './package-on-disk.ts';
 import { registeredProviderNameOf } from './provider-names.ts';
 
+/** The tool the demo provider calls, and only it: see `toolsForRuntime`. */
+export const DEMO_TOOL_NAME = 'demo.echo';
+
 export const createDemoTool = () =>
   defineLocalCommandTool({
-    name: 'demo.echo',
+    name: DEMO_TOOL_NAME,
     description: 'Return a tiny transformed summary for CLI demos through a real local process.',
     // It does spawn a process, but a fixed one: `node -e` over a script this
     // tool builds, with the model's text placed as a JSON string literal and
@@ -66,6 +70,53 @@ export const createDemoTool = () =>
     },
   });
 
+/**
+ * The host's tool registry with some names left out, read live: a tool
+ * the host registers or drops after the runner was built (a plugin
+ * reconnecting) is seen at once. A registration through it still lands
+ * on the host's registry, as it would have without it, so a runner that
+ * registers `skill.read` itself puts it where every other runner reads.
+ * `describe` comes from `ToolRegistry` and reads `list`.
+ */
+class ToolRegistryWithout extends ToolRegistry {
+  readonly #host: ToolRegistry;
+  readonly #hidden: ReadonlySet<string>;
+
+  constructor(host: ToolRegistry, hidden: Iterable<string>) {
+    super();
+    this.#host = host;
+    this.#hidden = new Set(hidden);
+  }
+
+  override register(tool: Parameters<ToolRegistry['register']>[0]): void {
+    this.#host.register(tool);
+  }
+
+  override unregister(name: string): boolean {
+    return this.#hidden.has(name) ? false : this.#host.unregister(name);
+  }
+
+  override get(name: string): ReturnType<ToolRegistry['get']> {
+    return this.#hidden.has(name) ? undefined : this.#host.get(name);
+  }
+
+  override list(): ReturnType<ToolRegistry['list']> {
+    return this.#host.list().filter((tool) => !this.#hidden.has(tool.name));
+  }
+}
+
+/**
+ * The tools a runner on this runtime gets. Hosts register `demo.echo` with
+ * the rest of their kernel tools, so it is listed, its name is the
+ * kernel's, and a soul naming it is not warned about. But it exists for
+ * the offline demo provider, which calls it to show a tool round trip, so
+ * only a demo runtime is given it: a real model is never offered it, and
+ * a call to it by name is refused like a call to any tool the runner
+ * lacks. A fallback is always a real provider, so the primary decides.
+ */
+export const toolsForRuntime = (tools: ToolRegistry, config: Pick<RuntimeConfig, 'provider'>): ToolRegistry =>
+  config.provider === 'demo' ? tools : new ToolRegistryWithout(tools, [DEMO_TOOL_NAME]);
+
 export const createDemoProvider = (): ModelProvider =>
   defineProvider({
     name: 'demo',
@@ -91,7 +142,7 @@ export const createDemoProvider = (): ModelProvider =>
       if (wantsTool) {
         builder.addToolCall({
           id: `${session.id}:call:demo-echo`,
-          toolName: 'demo.echo',
+          toolName: DEMO_TOOL_NAME,
           input: { text: prompt },
         });
       } else {
