@@ -314,6 +314,14 @@ daemon is still billing somewhere it can no longer name. A default of `demo`
 there would be a false statement about money, made exactly when someone is
 looking to find out what is running.
 
+### `front` is the soul's, as written
+
+An agent whose soul has a `front:` block carries it in `GET /agents` as
+`front: { model, provider?, tools? }`, verbatim: the model its conversation
+turns run on (see [Front](../../docs/concepts/agents.md#front)). `runsOn` is
+still the agent's own runtime, which everything else runs on. Absent for a
+soul with no block. It is set by editing the soul.
+
 ### The listing summarises; the single read does not
 
 `GET /agents` carries `persona`: the agent's first instruction line, trimmed

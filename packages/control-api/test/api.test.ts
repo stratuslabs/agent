@@ -12,6 +12,21 @@ import { bareHome, newHome, openSocket, rawPost, settles, startApi, writeSoul } 
 
 const json = async <T>(response: Response): Promise<T> => response.json() as Promise<T>;
 
+test('the roster carries a soul\'s front: as written, and leaves it out for a soul with none', async () => {
+  const home = await newHome();
+  await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: anthropic\nmodel: claude-opus-5\nfront:\n  model: claude-haiku-5-5\n  tools: [memory.recall]\n---\n\nYou are Ava.\n');
+  await writeSoul(home, 'rex.md', '---\nname: Rex\nid: rex\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nYou are Rex.\n');
+  const harness = await startApi({ home });
+  try {
+    const { agents } = await json<{ agents: Array<Record<string, unknown>> }>(await harness.call('/api/v1/agents'));
+    assert.deepEqual(agents.find((agent) => agent.id === 'ava')?.front, { model: 'claude-haiku-5-5', tools: ['memory.recall'] });
+    assert.deepEqual(agents.find((agent) => agent.id === 'ava')?.runsOn, { provider: 'anthropic', model: 'claude-opus-5' });
+    assert.equal('front' in (agents.find((agent) => agent.id === 'rex') ?? {}), false);
+  } finally {
+    await harness.stop();
+  }
+});
+
 test('the roster is served as data, avatar palette included', async () => {
   const home = await newHome();
   await writeSoul(home, 'ava.md', '---\nname: Ava\nid: ava\nprovider: anthropic\nmodel: claude-opus-5\n---\n\nYou are Ava.\n');
